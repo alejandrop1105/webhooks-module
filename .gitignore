@@ -1,0 +1,78 @@
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# Rider
+.idea/
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+
+# Build
+bld/
+msbuild.log
+msbuild.err
+msbuild.wrn
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Mac
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Secrets
+*.env
+appsettings.*.json
+!appsettings.json
+!appsettings.Development.json
+
+# Logs
+*.log
+
+# Test results
+TestResults/
+*.trx
+
+# NCrunch
+*.ncrunchproject
+*.ncrunchsolution
+
+# Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+
+# Code coverage
+coverage/
+*.coveragexml
+
+# .NET Core
+project.lock.json
+.publish/
