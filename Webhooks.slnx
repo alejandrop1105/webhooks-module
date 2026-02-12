@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/samples/">
     <Project Path="samples/SampleErpIntegration/SampleErpIntegration.csproj" />
+    <Project Path="samples/SampleErpWinForms/SampleErpWinForms.csproj" />
     <Project Path="samples/WooCommerceSimulator/WooCommerceSimulator.csproj" />
   </Folder>
   <Folder Name="/src/">

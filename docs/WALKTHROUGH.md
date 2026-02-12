@@ -1,109 +1,78 @@
-# Walkthrough: Sistema de Webhooks
+# Walkthrough: Sistema de Webhooks + Integración WinForms
 
 ## ✅ Objetivo Cumplido
 
-Se implementó un **módulo independiente de webhooks** para integrar con ERP C# WinForms, capaz de:
-- Recibir webhooks de sistemas externos (WooCommerce, Stripe, GitHub, Shopify)
-- Procesar eventos de forma asíncrona con reintentos
-- Preparado para emitir webhooks en el futuro
+Se implementó un **módulo independiente de webhooks** para integrar con ERP C# WinForms, ahora con **capacidades de tiempo real**.
 
 ---
 
-## 📁 Estructura Creada
+## 🚀 Nuevas Funcionalidades (Fase 4)
+
+### 1. 📡 Notificaciones en Tiempo Real (SignalR)
+La API ahora tiene un Hub de SignalR en `/hubs/webhooks` que notifica instantáneamente cuando:
+- 📥 Se recibe un webhook
+- ✅ Se procesa exitosamente
+- ❌ Ocurre un error
+
+### 2. 🖥️ Cliente WinForms de Ejemplo
+Una aplicación completa (`SampleErpWinForms`) que demuestra la integración perfecta:
+- **Conexión automática** al Hub de SignalR
+- **Grid en tiempo real** de eventos recibidos
+- **Controles de servicio**: Conectar, Desconectar, Pausar/Reanudar recepción
+- **Logs de actividad** detallados
+
+---
+
+## 📁 Estructura Completa
 
 ```
 WebHooks/
 ├── src/
-│   ├── Webhooks.Api/        # API REST receiver (ASP.NET Core 8)
-│   ├── Webhooks.Core/       # Lógica de negocio, modelos, servicios
-│   └── Webhooks.Worker/     # Procesador background (preparado)
+│   ├── Webhooks.Api/           # API REST + SignalR Hub
+│   ├── Webhooks.Core/          # Lógica, Modelos, Notificadores
+│   └── Webhooks.Worker/        # Worker Service
 ├── tests/
-│   └── Webhooks.Tests.Unit/ # 5 tests - todos pasando ✅
+│   └── Webhooks.Tests.Unit/    # Tests unitarios
 ├── samples/
-│   ├── WooCommerceSimulator/    # Simulador interactivo
-│   └── SampleErpIntegration/    # Ejemplo de integración
-├── docs/
-│   └── CLOUDFLARE_TUNNEL.md     # Guía de tunneling
-├── README.md
-└── nuget.config              # Configuración NuGet local
+│   ├── WooCommerceSimulator/   # Simulador de eventos
+│   ├── SampleErpIntegration/   # Ejemplo Consola (Polling)
+│   └── SampleErpWinForms/      # [NUEVO] Ejemplo WinForms (SignalR)
+└── docs/
+    └── ...
 ```
 
 ---
 
-## 🔧 Componentes Implementados
-
-| Componente | Archivo | Descripción |
-|------------|---------|-------------|
-| Modelos | `WebhookEvent.cs`, `WebhookSource.cs`, `WebhookSubscription.cs` | Entidades para persistencia |
-| DbContext | `WebhookDbContext.cs` | EF Core con SQLite |
-| Validador | `SignatureValidator.cs` | Validación HMAC-SHA256/1/512 |
-| Receptor | `WebhookReceiver.cs` | Recibe y encola webhooks |
-| Procesador | `WebhookProcessor.cs` | Procesa con reintentos y dead letter |
-| API | `Program.cs` | Endpoints REST + Hangfire |
-
----
-
-## 🧪 Tests Ejecutados
-
-```
-Resumen de pruebas: total: 5; con errores: 0; correcto: 5
-```
-
-| Test | Estado |
-|------|--------|
-| `Validate_WithValidSignature_ReturnsTrue` | ✅ |
-| `Validate_WithInvalidSignature_ReturnsFalse` | ✅ |
-| `Validate_WithNullPayload_ReturnsFalse` | ✅ |
-| `Validate_WithNullSignature_ReturnsFalse` | ✅ |
-| `Validate_WithPrefixedSignature_ReturnsTrue` | ✅ |
-
----
-
-## 🚀 Cómo Ejecutar
+## 🧪 Cómo Probar la Integración Completa
 
 ### 1. Iniciar la API
 ```powershell
-cd d:\DESARROLLO\ANTIGRAVITY\WebHooks\src\Webhooks.Api
+cd src/Webhooks.Api
 dotnet run
 ```
 
-Endpoints disponibles en `http://localhost:5000`:
-- **Swagger**: `/swagger`
-- **Hangfire Dashboard**: `/hangfire`
-- **Health Check**: `/health`
-
-### 2. Simular Webhook de WooCommerce
+### 2. Iniciar el Cliente WinForms
 ```powershell
-cd d:\DESARROLLO\ANTIGRAVITY\WebHooks\samples\WooCommerceSimulator
+cd samples/SampleErpWinForms
 dotnet run
 ```
+- Click en **Connect** (debería conectar a `localhost:5000`)
+- Verás el estado "Conectado" en verde
 
-### 3. Exponer con Cloudflare Tunnel
+### 3. Simular Webhook
 ```powershell
-cloudflared tunnel --url http://localhost:5000
+cd samples/WooCommerceSimulator
+dotnet run
 ```
+- Envía un evento (ej: Opción 1 - Order Created)
+- **¡Magia!** Verás aparecer el evento **instantáneamente** en la grilla del WinForms.
 
 ---
 
-## 📌 Próximos Pasos Sugeridos
+## 📊 Stack Tecnológico
 
-1. **Configurar clave secreta de WooCommerce** en la base de datos
-2. **Implementar handlers específicos** para eventos (ej: `OrderCreatedHandler`)
-3. **Conectar con tu ERP** via SignalR o polling
-4. **Prueba end-to-end** con WooCommerce real
-
----
-
-## 🛠️ Correcciones Realizadas
-
-- **Bug fix**: `SignatureValidator.NormalizeSignature` incorrectamente dividía firmas Base64 con padding `=`. Corregido para solo normalizar prefijos de algoritmo conocidos (`sha256=`, `sha1=`, etc.).
-
----
-
-## 📊 Stack Tecnológico Final
-
-- **.NET 8** - Framework
-- **SQLite** - Base de datos (desarrollo)
-- **Hangfire + SQLite** - Cola de trabajos
-- **Serilog** - Logging estructurado
-- **Cloudflare Tunnel** - Tunneling gratuito
+- **.NET 8**
+- **ASP.NET Core** (API + SignalR)
+- **WinForms** (Cliente Desktop)
+- **SignalR Client** (Protocolo WebSockets)
+- **SQLite + Hangfire** (Backend)

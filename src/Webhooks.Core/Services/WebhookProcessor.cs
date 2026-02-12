@@ -13,16 +13,19 @@ public class WebhookProcessor : IWebhookProcessor
 {
     private readonly WebhookDbContext _dbContext;
     private readonly IEnumerable<IWebhookEventHandler> _handlers;
+    private readonly IWebhookNotifier? _notifier;
     private readonly ILogger<WebhookProcessor> _logger;
 
     public WebhookProcessor(
         WebhookDbContext dbContext,
         IEnumerable<IWebhookEventHandler> handlers,
-        ILogger<WebhookProcessor> logger)
+        ILogger<WebhookProcessor> logger,
+        IWebhookNotifier? notifier = null)
     {
         _dbContext = dbContext;
         _handlers = handlers;
         _logger = logger;
+        _notifier = notifier;
     }
 
     /// <inheritdoc />
@@ -52,6 +55,12 @@ public class WebhookProcessor : IWebhookProcessor
             webhookEvent.Status = WebhookEventStatus.Processing;
             await _dbContext.SaveChangesAsync();
 
+            // Notificar que se recibió el evento
+            if (_notifier != null)
+            {
+                await _notifier.NotifyWebhookReceivedAsync(webhookEvent);
+            }
+
             // Buscar handlers compatibles
             var compatibleHandlers = _handlers
                 .Where(h => h.Source == webhookEvent.Source || h.Source == "*")
@@ -69,6 +78,12 @@ public class WebhookProcessor : IWebhookProcessor
             webhookEvent.Status = WebhookEventStatus.Completed;
             webhookEvent.ProcessedAt = DateTime.UtcNow;
 
+            // Notificar que se procesó exitosamente
+            if (_notifier != null)
+            {
+                await _notifier.NotifyWebhookProcessedAsync(webhookEvent);
+            }
+
             _logger.LogInformation("Evento {EventId} procesado exitosamente", eventId);
         }
         catch (Exception ex)
@@ -82,6 +97,12 @@ public class WebhookProcessor : IWebhookProcessor
                 _logger.LogError(ex,
                     "Evento {EventId} enviado a dead letter después de {Retries} intentos",
                     eventId, webhookEvent.RetryCount);
+
+                // Notificar el fallo
+                if (_notifier != null)
+                {
+                    await _notifier.NotifyWebhookFailedAsync(webhookEvent, ex.Message);
+                }
             }
             else
             {
@@ -89,6 +110,12 @@ public class WebhookProcessor : IWebhookProcessor
                 _logger.LogWarning(ex,
                     "Error procesando evento {EventId}, reintento {Retry}/{MaxRetries}",
                     eventId, webhookEvent.RetryCount, webhookEvent.MaxRetries);
+
+                // Notificar el fallo parcial
+                if (_notifier != null)
+                {
+                    await _notifier.NotifyWebhookFailedAsync(webhookEvent, ex.Message);
+                }
 
                 // Re-lanzar para que Hangfire reintente
                 await _dbContext.SaveChangesAsync();

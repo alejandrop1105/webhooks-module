@@ -1,7 +1,9 @@
 using Hangfire;
 using Hangfire.Storage.SQLite;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
+using Webhooks.Api.Hubs;
 using Webhooks.Core.Data;
 using Webhooks.Core.Interfaces;
 using Webhooks.Core.Services;
@@ -36,6 +38,22 @@ builder.Services.AddHangfireServer();
 builder.Services.AddScoped<ISignatureValidator, SignatureValidator>();
 builder.Services.AddScoped<IWebhookReceiver, WebhookReceiver>();
 builder.Services.AddScoped<IWebhookProcessor, WebhookProcessor>();
+builder.Services.AddScoped<IWebhookNotifier, SignalRWebhookNotifier>();
+
+// SignalR para notificaciones en tiempo real
+builder.Services.AddSignalR();
+
+// CORS para permitir conexiones desde WinForms
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyHeader()
+              .AllowAnyMethod()
+              .SetIsOriginAllowed(_ => true)
+              .AllowCredentials();
+    });
+});
 
 // Swagger
 builder.Services.AddEndpointsApiExplorer();
@@ -45,6 +63,9 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 var app = builder.Build();
+
+// Habilitar CORS
+app.UseCors("AllowAll");
 
 // Crear base de datos si no existe
 using (var scope = app.Services.CreateScope())
@@ -162,6 +183,9 @@ app.MapPost("/api/events/{id:guid}/retry", async (
 })
 .WithName("RetryEvent")
 .WithOpenApi();
+
+// Mapear SignalR Hub
+app.MapHub<WebhookHub>("/hubs/webhooks");
 
 app.Run();
 
