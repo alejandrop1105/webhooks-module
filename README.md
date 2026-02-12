@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![SQLite](https://img.shields.io/badge/SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![SignalR](https://img.shields.io/badge/SignalR-Realtime-red?style=for-the-badge&logo=signalr)](https://dotnet.microsoft.com/apps/aspnet/signalr)
+[![HttpListener](https://img.shields.io/badge/LightServer-Standalone-green?style=for-the-badge)](https://learn.microsoft.com/en-us/dotnet/api/system.net.httplistener)
 
 > **Módulo robusto y escalable** para la recepción, validación y procesamiento de webhooks de sistemas externos como **WooCommerce**, **Stripe**, **GitHub**, **Shopify** y más. Diseñado para integrarse perfectamente con sistemas ERP en C#/.NET.
 
@@ -13,6 +14,7 @@
 
 - 🔐 **Seguridad de Grado Bancario**: Validación de firmas HMAC (SHA-256, SHA-1, SHA-512) con protección contra timing attacks.
 - 📡 **Tiempo Real (SignalR)**: Módulo integrado para notificar a clientes de escritorio (WinForms, WPF) o Web instantáneamente.
+- 🪶 **Modo Ligero (Nuevo)**: Librería `Webhooks.LightServer` sin dependencias para levantar un servidor simple en cualquier aplicación .NET.
 - 🔄 **Resiliencia Automática**: Sistema de reintentos inteligente con backoff exponencial y Dead Letter Queue.
 - 📊 **Dashboard de Monitoreo**: Visualización completa de jobs y estado de procesamiento con Hangfire.
 - 🗃️ **Persistencia Ligera**: SQLite preconfigurado para un inicio rápido sin complicaciones.
@@ -37,34 +39,37 @@ Hemos preparado guías detalladas para facilitar tu integración:
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - (Opcional) [Cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
 
-### Instalación y Ejecución
+### Opción A: API Completa (SignalR + Hangfire)
 
-1. **Clonar el repositorio**:
-   ```bash
-   git clone https://github.com/alejandrop1105/webhooks-module.git
-   cd webhooks-module
-   ```
-
-2. **Ejecutar la API**:
+1. **Ejecutar la API**:
    ```bash
    cd src/Webhooks.Api
    dotnet run
    ```
    La API estará disponible en `http://localhost:5000`.
 
-3. **Ejecutar el Cliente de Ejemplo (WinForms)**:
+2. **Ejecutar Cliente de Ejemplo**:
    ```bash
-   # En una nueva terminal
    cd samples/SampleErpWinForms
    dotnet run
    ```
-   Verás una interfaz gráfica lista para recibir eventos en tiempo real.
 
-4. **Simular Eventos**:
+### Opción B: Librería Ligera (Solo Servidor Webhook)
+
+Ideal si quieres integrar la recepción de webhooks directamente en tu servicio de Windows o aplicación de consola sin levantar una API completa.
+
+1. **Ver ejemplo**:
    ```bash
-   # En una tercera terminal
-   cd samples/WooCommerceSimulator
+   cd samples/LightServerSample
    dotnet run
+   ```
+
+2. **Uso en tu código**:
+   ```csharp
+   using Webhooks.LightServer;
+   using var server = new SimpleWebhookServer(port: 8080, secretKey: "clave");
+   server.OnWebhookReceived += (s, e) => Console.WriteLine($"Evento de {e.Source}");
+   server.Start();
    ```
 
 ---
@@ -76,9 +81,11 @@ webhooks-module/
 ├── src/
 │   ├── Webhooks.Api/           # API REST (ASP.NET Core) con SignalR
 │   ├── Webhooks.Core/          # Lógica de negocio, modelos, interfaces
-│   └── Webhooks.Worker/        # Worker para procesamiento background
+│   ├── Webhooks.Worker/        # Worker para procesamiento background
+│   └── Webhooks.LightServer/   # 🆕 Servidor ligero Standalone (HttpListener)
 ├── samples/
-│   ├── SampleErpWinForms/      # 🆕 Cliente de escritorio con integración SignalR
+│   ├── SampleErpWinForms/      # Cliente de escritorio con integración SignalR
+│   ├── LightServerSample/      # 🆕 Ejemplo de uso de librería ligera
 │   └── WooCommerceSimulator/   # Generador de webhooks para pruebas
 └── docs/                       # Documentación técnica y guías
 ```

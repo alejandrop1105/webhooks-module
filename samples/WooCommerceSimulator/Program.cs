@@ -9,7 +9,9 @@ Console.WriteLine("===========================================");
 Console.WriteLine();
 
 // Configuración
-var webhookUrl = args.Length > 0 ? args[0] : "http://localhost:5000/api/webhooks/woocommerce";
+var webhookUrl = args.Length > 0 ? args[0] : "http://124.0.0.24:500";
+//    "https://tests-agrees-encountered-emotional.trycloudflare.com/api/webhooks/woocommerce";
+// "http://localhost:5000/api/webhooks/woocommerce";
 var secretKey = args.Length > 1 ? args[1] : "mi_clave_secreta";
 
 Console.WriteLine($"URL del webhook: {webhookUrl}");
