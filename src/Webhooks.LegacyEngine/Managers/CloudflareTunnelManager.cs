@@ -71,6 +71,12 @@ public class CloudflareTunnelManager : IDisposable
     {
         KillProcessSafely(); // Limpiar por si acaso
 
+        // Destrucción de Zombies: Eliminar cualquier cloudflared huérfano que cause loops o bloquee puertos.
+        foreach (var proc in Process.GetProcessesByName("cloudflared"))
+        {
+            try { proc.Kill(); } catch { }
+        }
+
         NotifyStatus("Iniciando Proceso...", "🟡");
 
         try
