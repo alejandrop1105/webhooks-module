@@ -31,7 +31,10 @@ builder.Services.AddHangfire(config => config
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
     .UseSimpleAssemblyNameTypeSerializer()
     .UseRecommendedSerializerSettings()
-    .UseSQLiteStorage(hangfireDbPath));
+    .UseSQLiteStorage(hangfireDbPath, new SQLiteStorageOptions
+    {
+        QueuePollInterval = TimeSpan.FromSeconds(1)
+    }));
 builder.Services.AddHangfireServer();
 
 // Registrar servicios

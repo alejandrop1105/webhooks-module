@@ -1,14 +1,12 @@
 <Solution>
   <Folder Name="/samples/">
-    <Project Path="samples/LightServerSample/LightServerSample.csproj" />
-    <Project Path="samples/SampleErpIntegration/SampleErpIntegration.csproj" />
+    <Project Path="samples/LegacyErpClient/LegacyErpClient.csproj" />
     <Project Path="samples/SampleErpWinForms/SampleErpWinForms.csproj" />
-    <Project Path="samples/WooCommerceSimulator/WooCommerceSimulator.csproj" />
-  </Folder>
+    <Project Path="samples/WooCommerceSimulator/WooCommerceSimulator.csproj" />  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Webhooks.Api/Webhooks.Api.csproj" />
     <Project Path="src/Webhooks.Core/Webhooks.Core.csproj" />
-    <Project Path="src/Webhooks.LightServer/Webhooks.LightServer.csproj" />
+    <Project Path="src/Webhooks.LegacyEngine/Webhooks.LegacyEngine.csproj" />
     <Project Path="src/Webhooks.Worker/Webhooks.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">

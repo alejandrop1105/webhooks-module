@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.SignalR.Client;
 
 namespace SampleErpWinForms;
@@ -25,6 +27,15 @@ public partial class MainForm : Form
     private ComboBox cmbFilter = null!;
     private Button btnClear = null!;
 
+    // Cloudflare Tunnel
+    private Process? _cloudflaredProcess;
+    private System.Windows.Forms.Timer _tunnelMonitorTimer = null!;
+    private Button btnStartTunnel = null!;
+    private Button btnStopTunnel = null!;
+    private Label lblTunnelStatus = null!;
+    private TextBox txtTunnelUrl = null!;
+    private bool _isInstallingCloudflared = false;
+
     public MainForm()
     {
         InitializeComponent();
@@ -42,7 +53,7 @@ public partial class MainForm : Form
         var panelTop = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 80,
+            Height = 130,
             Padding = new Padding(10),
             BackColor = Color.FromArgb(45, 45, 48)
         };
@@ -136,10 +147,22 @@ public partial class MainForm : Form
         };
         btnClear.Click += (s, e) => { _events.Clear(); RefreshGrid(); AppendLog("Lista limpiada"); };
 
+        var lblTunnel = new Label { Text = "Cloudflare Tunnel:", ForeColor = Color.White, Location = new Point(10, 85), AutoSize = true };
+        btnStartTunnel = new Button { Text = "⚡ Iniciar Túnel", Location = new Point(130, 82), Size = new Size(110, 28), BackColor = Color.FromArgb(244, 129, 32), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnStartTunnel.Click += BtnStartTunnel_Click;
+        btnStopTunnel = new Button { Text = "⬛ Detener", Location = new Point(250, 82), Size = new Size(80, 28), BackColor = Color.DimGray, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Enabled = false };
+        btnStopTunnel.Click += BtnStopTunnel_Click;
+        lblTunnelStatus = new Label { Text = "● Apagado", ForeColor = Color.Gray, Location = new Point(340, 88), AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold) };
+        txtTunnelUrl = new TextBox { Text = "Esperando URL...", Location = new Point(440, 85), Width = 350, ReadOnly = true, Font = new Font("Consolas", 9), BackColor = Color.FromArgb(30, 30, 30), ForeColor = Color.Orange };
+
         panelTop.Controls.AddRange(new Control[] {
             lblUrl, txtServerUrl, btnConnect, btnDisconnect, btnPause,
-            lblStatus, lblFilter, cmbFilter, btnClear
+            lblStatus, lblFilter, cmbFilter, btnClear,
+            lblTunnel, btnStartTunnel, btnStopTunnel, lblTunnelStatus, txtTunnelUrl
         });
+
+        _tunnelMonitorTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _tunnelMonitorTimer.Tick += TunnelMonitorTimer_Tick;
 
         // Panel central - Grid de eventos
         var splitContainer = new SplitContainer
@@ -334,7 +357,7 @@ public partial class MainForm : Form
             try
             {
                 var json = JsonSerializer.Serialize(data);
-                var evt = JsonSerializer.Deserialize<WebhookNotification>(json);
+                var evt = JsonSerializer.Deserialize<WebhookNotification>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
                 if (evt != null && ShouldShowEvent(evt.Source))
                 {
@@ -367,7 +390,7 @@ public partial class MainForm : Form
             try
             {
                 var json = JsonSerializer.Serialize(data);
-                var evt = JsonSerializer.Deserialize<WebhookNotification>(json);
+                var evt = JsonSerializer.Deserialize<WebhookNotification>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
                 if (evt != null)
                 {
@@ -396,7 +419,7 @@ public partial class MainForm : Form
             try
             {
                 var json = JsonSerializer.Serialize(data);
-                var evt = JsonSerializer.Deserialize<WebhookNotification>(json);
+                var evt = JsonSerializer.Deserialize<WebhookNotification>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
                 if (evt != null)
                 {
@@ -468,12 +491,177 @@ public partial class MainForm : Form
     {
         _hubConnection?.StopAsync().Wait(1000);
         _hubConnection?.DisposeAsync();
+        StopCloudflaredProcess();
         base.OnFormClosing(e);
     }
 
     private void MainForm_Load(object sender, EventArgs e)
     {
 
+    }
+
+    // --- Cloudflare Tunnel Methods ---
+    private async void BtnStartTunnel_Click(object? sender, EventArgs e)
+    {
+        if (_isInstallingCloudflared) return;
+
+        var exePath = Path.Combine(AppContext.BaseDirectory, "cloudflared.exe");
+
+        // Determinar si debemos instalar
+        if (!File.Exists(exePath))
+        {
+            var systemPath = Environment.GetEnvironmentVariable("PATH");
+            var paths = systemPath?.Split(';') ?? Array.Empty<string>();
+            bool existsInPath = paths.Any(p => File.Exists(Path.Combine(p, "cloudflared.exe")));
+
+            if (!existsInPath)
+            {
+                await DownloadCloudflaredAsync(exePath);
+                if (!File.Exists(exePath)) return; // Falló la descarga
+            }
+            else
+            {
+                exePath = "cloudflared"; // Asumimos que correrá porque está en path
+            }
+        }
+
+        StartCloudflaredProcess(exePath);
+    }
+
+    private void BtnStopTunnel_Click(object? sender, EventArgs e)
+    {
+        StopCloudflaredProcess();
+    }
+
+    private async Task DownloadCloudflaredAsync(string targetPath)
+    {
+        try
+        {
+            _isInstallingCloudflared = true;
+            btnStartTunnel.Enabled = false;
+            UpdateTunnelStatus("Descargando cloudflared...", Color.Orange);
+            AppendLog("Descargando Cloudflare Tunnel desde GitHub (60MB approx)...");
+
+            using var httpClient = new HttpClient();
+            var url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
+            var response = await httpClient.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+
+            using var fileStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            await response.Content.CopyToAsync(fileStream);
+
+            AppendLog("cloudflared descargado con éxito.");
+        }
+        catch (Exception ex)
+        {
+            UpdateTunnelStatus("Error Descarga", Color.Red);
+            AppendLog($"Error al descargar cloudflared: {ex.Message}");
+            MessageBox.Show($"No se pudo descargar cloudflared: {ex.Message}");
+        }
+        finally
+        {
+            _isInstallingCloudflared = false;
+            btnStartTunnel.Enabled = true;
+        }
+    }
+
+    private void StartCloudflaredProcess(string exePath)
+    {
+        try
+        {
+            StopCloudflaredProcess();
+
+            _cloudflaredProcess = new Process();
+            _cloudflaredProcess.StartInfo.FileName = exePath;
+            // --url apunta al API local por defecto de Webhooks (puerto 5000)
+            _cloudflaredProcess.StartInfo.Arguments = "tunnel --url http://localhost:5000";
+            _cloudflaredProcess.StartInfo.UseShellExecute = false;
+            _cloudflaredProcess.StartInfo.RedirectStandardError = true;
+            _cloudflaredProcess.StartInfo.CreateNoWindow = true;
+
+            _cloudflaredProcess.ErrorDataReceived += (sender, args) =>
+            {
+                if (string.IsNullOrEmpty(args.Data)) return;
+
+                // Capturar el regex de la URL de cloudflare trycloudflare.com
+                var match = Regex.Match(args.Data, @"https://[a-zA-Z0-9-]+\.trycloudflare\.com");
+                if (match.Success)
+                {
+                    Invoke(() =>
+                    {
+                        txtTunnelUrl.Text = match.Value;
+                        UpdateTunnelStatus("Túnel Activo", Color.LimeGreen);
+                        AppendLog($"Túnel iniciado en URL pública: {match.Value}");
+                    });
+                }
+            };
+
+            _cloudflaredProcess.Start();
+            _cloudflaredProcess.BeginErrorReadLine();
+
+            _tunnelMonitorTimer.Start();
+
+            btnStartTunnel.Enabled = false;
+            btnStopTunnel.Enabled = true;
+            UpdateTunnelStatus("Iniciando...", Color.Yellow);
+            txtTunnelUrl.Text = "Esperando URL...";
+            AppendLog("Proceso cloudflared arrancado. Esperando handshake...");
+        }
+        catch (Exception ex)
+        {
+            UpdateTunnelStatus("Error", Color.Red);
+            AppendLog($"No se pudo iniciar túnel: {ex.Message}");
+            MessageBox.Show($"Error ejecutando cloudflared: {ex.Message}", "Error");
+            StopCloudflaredProcess();
+        }
+    }
+
+    private void StopCloudflaredProcess()
+    {
+        if (_cloudflaredProcess != null && !_cloudflaredProcess.HasExited)
+        {
+            try
+            {
+                _cloudflaredProcess.Kill();
+            }
+            catch { }
+        }
+
+        _cloudflaredProcess?.Dispose();
+        _cloudflaredProcess = null;
+
+        _tunnelMonitorTimer.Stop();
+
+        if (IsHandleCreated && !Disposing && !IsDisposed)
+        {
+            Invoke(() =>
+            {
+                UpdateTunnelStatus("Apagado", Color.Gray);
+                btnStartTunnel.Enabled = true;
+                btnStopTunnel.Enabled = false;
+                txtTunnelUrl.Text = "Esperando URL...";
+                AppendLog("Túnel local detenido.");
+            });
+        }
+    }
+
+    private void TunnelMonitorTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_cloudflaredProcess != null && _cloudflaredProcess.HasExited)
+        {
+            _tunnelMonitorTimer.Stop();
+            UpdateTunnelStatus("Caído", Color.Red);
+            AppendLog("¡El proceso de cloudflared ha terminado inesperadamente!");
+
+            btnStartTunnel.Enabled = true;
+            btnStopTunnel.Enabled = false;
+        }
+    }
+
+    private void UpdateTunnelStatus(string status, Color color)
+    {
+        lblTunnelStatus.Text = $"● {status}";
+        lblTunnelStatus.ForeColor = color;
     }
 }
 
