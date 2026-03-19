@@ -1,78 +1,71 @@
-# Walkthrough: Sistema de Webhooks + Integración WinForms
+# Walkthrough: Migración a Cloudflare Named Tunnels
 
-## ✅ Objetivo Cumplido
+## Resumen
 
-Se implementó un **módulo independiente de webhooks** para integrar con ERP C# WinForms, ahora con **capacidades de tiempo real**.
+Se migró la DLL `Webhooks.LegacyEngine` de Quick Tunnels (URLs aleatorias `.trycloudflare.com`) a **Named Tunnels** provisionados vía API REST de Cloudflare. La solución es **100% desatendida**: auto-descarga cloudflared, crea el túnel, configura DNS, y todo se maneja desde la UI del ERP.
 
----
+## Cambios Realizados
 
-## 🚀 Nuevas Funcionalidades (Fase 4)
+### Archivos nuevos
+| Archivo                                                                                                                  | Descripción                                      |
+| ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| [CloudflareConfig.cs](file:///d:/DESARROLLO/ANTIGRAVITY/WebHooks/src/Webhooks.LegacyEngine/Managers/CloudflareConfig.cs) | Modelo de configuración con validación integrada |
 
-### 1. 📡 Notificaciones en Tiempo Real (SignalR)
-La API ahora tiene un Hub de SignalR en `/hubs/webhooks` que notifica instantáneamente cuando:
-- 📥 Se recibe un webhook
-- ✅ Se procesa exitosamente
-- ❌ Ocurre un error
+### Archivos modificados
+| Archivo                                                                                                                                | Cambios                                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| [CloudflareTunnelManager.cs](file:///d:/DESARROLLO/ANTIGRAVITY/WebHooks/src/Webhooks.LegacyEngine/Managers/CloudflareTunnelManager.cs) | Reescrito completo: API REST, auto-descarga, reset, reutilización |
+| [WebhookHost.cs](file:///d:/DESARROLLO/ANTIGRAVITY/WebHooks/src/Webhooks.LegacyEngine/Engine/WebhookHost.cs)                           | Nuevo `SetCloudflareConfig()` y `ResetTunnel()`                   |
+| [Form1.cs](file:///d:/DESARROLLO/ANTIGRAVITY/WebHooks/samples/LegacyErpClient/Form1.cs)                                                | UI con campos Cloudflare, botón Reset, persistencia               |
+| [CLOUDFLARE_TUNNEL.md](file:///d:/DESARROLLO/ANTIGRAVITY/WebHooks/docs/CLOUDFLARE_TUNNEL.md)                                           | Documentación actualizada con Named Tunnel real                   |
 
-### 2. 🖥️ Cliente WinForms de Ejemplo
-Una aplicación completa (`SampleErpWinForms`) que demuestra la integración perfecta:
-- **Conexión automática** al Hub de SignalR
-- **Grid en tiempo real** de eventos recibidos
-- **Controles de servicio**: Conectar, Desconectar, Pausar/Reanudar recepción
-- **Logs de actividad** detallados
+### Configuración Cloudflare realizada
+| Recurso       | Valor                                                         |
+| ------------- | ------------------------------------------------------------- |
+| Dominio       | `dotarsoluciones.com`                                         |
+| Túnel inicial | `webhooks-dotar` (ID: `d3cdf7a6-7448-4b86-9c5e-0060aaf3230a`) |
+| Config file   | `C:\Users\Ale\.cloudflared\config.yml`                        |
 
----
-
-## 📁 Estructura Completa
+## Arquitectura Final
 
 ```
-WebHooks/
-├── src/
-│   ├── Webhooks.Api/           # API REST + SignalR Hub
-│   ├── Webhooks.Core/          # Lógica, Modelos, Notificadores
-│   └── Webhooks.Worker/        # Worker Service
-├── tests/
-│   └── Webhooks.Tests.Unit/    # Tests unitarios
-├── samples/
-│   ├── WooCommerceSimulator/   # Simulador de eventos
-│   ├── SampleErpIntegration/   # Ejemplo Consola (Polling)
-│   └── SampleErpWinForms/      # [NUEVO] Ejemplo WinForms (SignalR)
-└── docs/
-    └── ...
+┌──────────────────────────────────┐
+│  cloudflared.exe (proceso hijo)  │ ← Vive con la app, muere con la app
+│  erp-xxx.dotarsoluciones.com     │
+│         ↓ rutea a                │
+│    localhost:5000                 │
+└──────────────┬───────────────────┘
+               │
+┌──────────────▼───────────────────┐
+│  App WinForms (.NET 4.8)         │
+│  ┌─────────────────────────────┐ │
+│  │ Webhooks.LegacyEngine (DLL) │ │
+│  │  ├── OWIN Server :5000      │ │
+│  │  ├── WebhooksController     │ │
+│  │  └── CloudflareTunnelMgr    │ │ ← API REST + auto-descarga
+│  └─────────────────────────────┘ │
+└──────────────────────────────────┘
 ```
 
----
+## Funcionalidades
 
-## 🧪 Cómo Probar la Integración Completa
+- **Auto-descarga**: Si `cloudflared.exe` no existe, se descarga automáticamente (~60MB).
+- **Provisionamiento vía API**: Crea el túnel y DNS CNAME sin `cert.pem`.
+- **Reutilización**: Si el túnel ya existe en Cloudflare, lo reutiliza sin duplicar.
+- **Reset**: Elimina config local y cloudflared sin tocar el túnel en la nube.
+- **Watchdog**: Detecta caídas del proceso y auto-reconecta.
+- **Lifecycle**: Túnel vive mientras la app corre, muere al cerrarla.
 
-### 1. Iniciar la API
-```powershell
-cd src/Webhooks.Api
-dotnet run
-```
+## Verificación
 
-### 2. Iniciar el Cliente WinForms
-```powershell
-cd samples/SampleErpWinForms
-dotnet run
-```
-- Click en **Connect** (debería conectar a `localhost:5000`)
-- Verás el estado "Conectado" en verde
+- ✅ `Webhooks.LegacyEngine` compila correctamente (0 errores)
+- ✅ `LegacyErpClient` compila correctamente (0 errores)
+- ⏳ Test end-to-end pendiente (requiere crear API Token en Cloudflare Dashboard)
 
-### 3. Simular Webhook
-```powershell
-cd samples/WooCommerceSimulator
-dotnet run
-```
-- Envía un evento (ej: Opción 1 - Order Created)
-- **¡Magia!** Verás aparecer el evento **instantáneamente** en la grilla del WinForms.
+## Próximos Pasos
 
----
-
-## 📊 Stack Tecnológico
-
-- **.NET 8**
-- **ASP.NET Core** (API + SignalR)
-- **WinForms** (Cliente Desktop)
-- **SignalR Client** (Protocolo WebSockets)
-- **SQLite + Hangfire** (Backend)
+1. Crear API Token en [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) con permisos:
+   - `Account` > `Cloudflare Tunnel` > `Edit`
+   - `Zone` > `DNS` > `Edit`
+2. Obtener Account ID y Zone ID del dashboard
+3. Ejecutar LegacyErpClient, llenar campos de Cloudflare, y probar "☁️ API + Tunnel"

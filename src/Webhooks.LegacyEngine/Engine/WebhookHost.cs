@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Net.Http;
+using System.Security.Principal;
 using System.Threading.Tasks;
 using Microsoft.Owin.Hosting;
 using Serilog;
@@ -16,11 +17,15 @@ namespace Webhooks.LegacyEngine.Engine;
 /// </summary>
 public class WebhookHost : IDisposable
 {
-    private IDisposable _owinServer;
-    private CloudflareTunnelManager _tunnelManager;
+    private IDisposable? _owinServer;
+    private CloudflareTunnelManager? _tunnelManager;
     private readonly int _port;
     private readonly System.Timers.Timer _owinWatchdogTimer;
-    private bool _enableTunnelFlag;
+    private CloudflareConfig? _cloudflareConfig;
+    private string _listeningUrl = string.Empty;
+    private bool _isTunnelEnabled;
+    private bool _isTunnelConnected;
+
 
     // --- MEGAFONOS (Eventos hacia la UI) ---
 
@@ -40,28 +45,68 @@ public class WebhookHost : IDisposable
     public event EventHandler<string> OnTunnelStatusChanged;
 
     /// <summary>
-    /// Cuando Cloudflare nos otorga una URL .trycloudflare.com pública
+    /// Cuando Cloudflare nos otorga una URL pública fija
     /// </summary>
     public event EventHandler<string> OnTunnelUrlGenerated;
+
+    /// <summary>
+    /// Cuando el servidor local arranca y tiene una URL accesible
+    /// </summary>
+    public event EventHandler<string> OnLocalUrlGenerated;
 
     /// <summary>
     /// Emite los logs de Serilog a la UI
     /// </summary>
     public event EventHandler<LogEventArgs> OnSystemLog;
 
+    /// <summary>
+    /// Se dispara cada vez que cambia el estado del engine (activo/inactivo, modo local/público).
+    /// </summary>
+    public event EventHandler<EngineState> OnStateChanged;
+
     // --- FIN MEGAFONOS ---
 
     // Singleton para acceso fácil desde el WebhooksController
-    public static WebhookHost Instance { get; private set; }
+    public static WebhookHost? Instance { get; private set; }
+
+    // --- PROPIEDADES DE ESTADO ---
+
+    /// <summary>
+    /// Indica si el servidor HTTP está activo y escuchando.
+    /// </summary>
+    public bool IsRunning => _owinServer != null;
+
+    /// <summary>
+    /// Indica si el túnel de Cloudflare está habilitado (se solicitó arranque con tunnel).
+    /// </summary>
+    public bool IsTunnelEnabled => _isTunnelEnabled;
+
+    /// <summary>
+    /// Indica si el túnel de Cloudflare está conectado y público.
+    /// </summary>
+    public bool IsTunnelConnected => _isTunnelConnected;
+
+    /// <summary>
+    /// Modo actual del engine: Stopped, Local o Public.
+    /// </summary>
+    public EngineMode CurrentMode
+    {
+        get
+        {
+            if (!IsRunning) return EngineMode.Stopped;
+            return _isTunnelEnabled && _isTunnelConnected ? EngineMode.Public : EngineMode.Local;
+        }
+    }
+
+    /// <summary>
+    /// Indica si el servidor está escuchando en todas las interfaces de red (accesible por IP LAN).
+    /// </summary>
+    public bool IsListeningOnAllInterfaces => _listeningUrl.Contains("+");
 
     public WebhookHost(int port = 5000)
     {
         _port = port;
         Instance = this;
-
-        _tunnelManager = new CloudflareTunnelManager(port);
-        _tunnelManager.OnStatusChanged += (s, ev) => OnTunnelStatusChanged?.Invoke(this, ev);
-        _tunnelManager.OnUrlGenerated += (s, ev) => OnTunnelUrlGenerated?.Invoke(this, ev);
 
         // Inicializar Serilog Rotativo (Retención 5 días) y Sink UI
         string logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "webhook-engine-.txt");
@@ -79,15 +124,59 @@ public class WebhookHost : IDisposable
         // Watchdog de Salud Interna (Verifica que OWIN responda HTTP)
         _owinWatchdogTimer = new System.Timers.Timer(10000); // 10 segundos
         _owinWatchdogTimer.Elapsed += Watchdog_CheckOwinHealth;
+
+        // Conectar el broker de clientes a esta instancia
+        WebhookClientBroker.Bind(this);
+    }
+
+    /// <summary>
+    /// Configura las credenciales de Cloudflare. Debe llamarse antes de Start con tunnel.
+    /// </summary>
+    public void SetCloudflareConfig(CloudflareConfig config)
+    {
+        _cloudflareConfig = config;
+
+        // Recrear el tunnel manager con la nueva config
+        if (_tunnelManager != null)
+        {
+            _tunnelManager.OnStatusChanged -= TunnelManager_OnStatusChanged;
+            _tunnelManager.OnUrlGenerated -= TunnelManager_OnUrlGenerated;
+            _tunnelManager.Dispose();
+        }
+
+        _tunnelManager = new CloudflareTunnelManager(_port, config);
+        _tunnelManager.OnStatusChanged += TunnelManager_OnStatusChanged;
+        _tunnelManager.OnUrlGenerated += TunnelManager_OnUrlGenerated;
+    }
+
+    private void TunnelManager_OnStatusChanged(object sender, string e)
+    {
+        // Detectar cambio de conexión del túnel por el icono de estado
+        bool wasConnected = _isTunnelConnected;
+        if (e.Contains("🟢") && e.Contains("Establecido"))
+            _isTunnelConnected = true;
+        else if (e.Contains("🔴") || e.Contains("Detenido"))
+            _isTunnelConnected = false;
+
+        OnTunnelStatusChanged?.Invoke(this, e);
+
+        if (wasConnected != _isTunnelConnected)
+            EmitStateChanged();
+    }
+
+    private void TunnelManager_OnUrlGenerated(object sender, string e)
+    {
+        OnTunnelUrlGenerated?.Invoke(this, e);
     }
 
     /// <summary>
     /// Arranca el Web Server interno y opcionalmente el puente de red
     /// </summary>
-    public void Start(bool enableTunnel = false)
+    public async Task Start(bool enableTunnel = false)
     {
-        _enableTunnelFlag = enableTunnel;
         Stop(); // Limpiar basuras previas
+        _isTunnelEnabled = enableTunnel;
+        _isTunnelConnected = false;
 
         try
         {
@@ -95,12 +184,19 @@ public class WebhookHost : IDisposable
 
             if (enableTunnel)
             {
-                Log.Information("Arrancando Cloudflare Tunnel Manager...");
-                // Disparamos la auto-descarga y vigilancia de forma asincrónica
-                _ = _tunnelManager.StartAsync();
+                if (_tunnelManager == null || _cloudflareConfig == null || !_cloudflareConfig.IsValid)
+                {
+                    Log.Warning("No se puede iniciar el túnel: configuración de Cloudflare no establecida o incompleta.");
+                    OnTunnelStatusChanged?.Invoke(this, "🔴 Configuración de Cloudflare incompleta. Configure antes de iniciar.");
+                    return;
+                }
+
+                Log.Information("Arrancando Cloudflare Named Tunnel...");
+                await _tunnelManager.StartAsync();
             }
 
             _owinWatchdogTimer.Start();
+            EmitStateChanged();
         }
         catch (Exception ex)
         {
@@ -113,14 +209,162 @@ public class WebhookHost : IDisposable
     {
         if (_owinServer != null) return; // Ya está corriendo
 
-        // BYPASS de Permisos Administrador usando localhost estricto
-        string url = $"http://localhost:{_port}/";
+        string allInterfacesUrl = $"http://+:{_port}/";
+        string localhostUrl = $"http://localhost:{_port}/";
 
-        // Levantamos OWIN (Este hilo no bloquea la interfaz)
-        _owinServer = WebApp.Start<Server.Startup>(url);
+        // Verificar si la URL ACL ya está registrada en el sistema
+        bool aclExists = IsUrlAclRegistered();
 
-        Log.Information($"API HTTP interna escuchando en {url}");
-        OnServerStatusChanged?.Invoke(this, $"🟢 API HTTP escuchando en {url}");
+        if (aclExists)
+        {
+            // La ACL existe → usar exclusivamente http://+:port (localhost genera conflicto)
+            _owinServer = WebApp.Start<Server.Startup>(allInterfacesUrl);
+            _listeningUrl = allInterfacesUrl;
+            Log.Information($"API HTTP escuchando en TODAS las interfaces (puerto {_port})");
+            OnServerStatusChanged?.Invoke(this, $"🟢 API HTTP escuchando en todas las interfaces (puerto {_port})");
+            EmitLocalUrl();
+            return;
+        }
+
+        // No hay ACL → solicitar elevación UAC
+        Log.Warning("Sin permisos para escuchar en todas las interfaces. Solicitando elevación...");
+        OnServerStatusChanged?.Invoke(this, "🟠 Se requiere permiso para aceptar conexiones por IP LAN...");
+
+        if (TryRegisterUrlAcl())
+        {
+            // ACL registrada acabamos de registrar → usar http://+:port
+            _owinServer = WebApp.Start<Server.Startup>(allInterfacesUrl);
+            _listeningUrl = allInterfacesUrl;
+            Log.Information($"URL ACL registrada. API HTTP escuchando en TODAS las interfaces (puerto {_port})");
+            OnServerStatusChanged?.Invoke(this, $"🟢 API HTTP escuchando en todas las interfaces (puerto {_port})");
+            EmitLocalUrl();
+            return;
+        }
+
+        // UAC rechazado → fallback seguro a localhost (no hay ACL, así que no hay conflicto)
+        _owinServer = WebApp.Start<Server.Startup>(localhostUrl);
+        _listeningUrl = localhostUrl;
+        Log.Warning("Escuchando solo en localhost (sin acceso por IP LAN). Acepte el permiso UAC para habilitar acceso LAN.");
+        OnServerStatusChanged?.Invoke(this, $"🟠 API HTTP solo en localhost:{_port} (sin acceso LAN)");
+        EmitLocalUrl();
+    }
+
+    /// <summary>
+    /// Emite la URL local accesible hacia la UI.
+    /// </summary>
+    private void EmitLocalUrl()
+    {
+        string localUrl;
+        if (IsListeningOnAllInterfaces)
+        {
+            // Mostrar la primera IP de red local del equipo
+            string localIp = GetLocalIpAddress();
+            localUrl = $"http://{localIp}:{_port}";
+        }
+        else
+        {
+            localUrl = $"http://localhost:{_port}";
+        }
+        OnLocalUrlGenerated?.Invoke(this, localUrl);
+    }
+
+    /// <summary>
+    /// Obtiene la IP local de la primera interfaz de red activa.
+    /// </summary>
+    private static string GetLocalIpAddress()
+    {
+        try
+        {
+            var host = System.Net.Dns.GetHostEntry(System.Net.Dns.GetHostName());
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    return ip.ToString();
+            }
+        }
+        catch { }
+        return "localhost";
+    }
+
+    /// <summary>
+    /// Verifica si la URL ACL para http://+:{port}/ ya está registrada en Windows.
+    /// </summary>
+    private bool IsUrlAclRegistered()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("netsh", "http show urlacl")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+
+            var process = Process.Start(psi);
+            if (process == null) return false;
+
+            string output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit(5000);
+
+            string expectedUrl = $"http://+:{_port}/";
+            return output.IndexOf(expectedUrl, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"Error verificando URL ACL: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Registra la URL ACL via netsh con elevación UAC.
+    /// Usa el SID S-1-1-0 (Everyone/TODOS) para compatibilidad con cualquier idioma del SO.
+    /// </summary>
+    private bool TryRegisterUrlAcl()
+    {
+        try
+        {
+            // Resolver nombre localizado del grupo "Everyone" (TODOS en español, Everyone en inglés)
+            var sid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            string everyoneName = sid.Translate(typeof(NTAccount)).Value;
+
+            string arguments = $"http add urlacl url=http://+:{_port}/ user=\"{everyoneName}\"";
+
+            var psi = new ProcessStartInfo("netsh", arguments)
+            {
+                Verb = "runas",
+                UseShellExecute = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+
+            var process = Process.Start(psi);
+            process?.WaitForExit(10000); // Timeout de 10 segundos
+
+            bool success = process?.ExitCode == 0;
+
+            if (success)
+            {
+                Log.Information($"URL ACL registrada exitosamente para usuario: {everyoneName}");
+            }
+            else
+            {
+                Log.Warning($"No se pudo registrar URL ACL (exit code: {process?.ExitCode})");
+            }
+
+            return success;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // El usuario rechazó el UAC
+            Log.Warning("El usuario rechazó la elevación UAC. Continuando con localhost.");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"Error al intentar registrar URL ACL: {ex.Message}");
+            return false;
+        }
     }
 
     private async void Watchdog_CheckOwinHealth(object sender, System.Timers.ElapsedEventArgs e)
@@ -130,6 +374,7 @@ public class WebhookHost : IDisposable
 
         try
         {
+            // El watchdog siempre verifica contra localhost (funciona en ambos modos)
             using (var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(3) })
             {
                 var response = await hc.GetAsync($"http://localhost:{_port}/api/webhooks/ping");
@@ -166,8 +411,29 @@ public class WebhookHost : IDisposable
 
         _tunnelManager?.Stop();
 
+        _isTunnelEnabled = false;
+        _isTunnelConnected = false;
+        _listeningUrl = string.Empty;
+
         Log.Information("API HTTP Apagado");
         OnServerStatusChanged?.Invoke(this, "🔴 API HTTP Apagado");
+        EmitStateChanged();
+    }
+
+    /// <summary>
+    /// Reset completo del túnel: elimina config local y cloudflared.exe.
+    /// El túnel persiste en Cloudflare para reutilización futura.
+    /// </summary>
+    public void ResetTunnel()
+    {
+        if (_tunnelManager == null)
+        {
+            Log.Warning("No hay Tunnel Manager configurado para resetear.");
+            return;
+        }
+
+        _tunnelManager.Reset();
+        Log.Information("Reset de túnel Cloudflare completado");
     }
 
     // --- Métodos Invocados Internamente por los Controllers ---
@@ -189,23 +455,64 @@ public class WebhookHost : IDisposable
         OnSystemLog?.Invoke(this, new LogEventArgs { Level = level, Message = message });
     }
 
+    /// <summary>
+    /// Emite el estado actual del engine a los suscriptores.
+    /// </summary>
+    private void EmitStateChanged()
+    {
+        var state = new EngineState
+        {
+            IsRunning = IsRunning,
+            IsTunnelEnabled = _isTunnelEnabled,
+            IsTunnelConnected = _isTunnelConnected,
+            Mode = CurrentMode
+        };
+        OnStateChanged?.Invoke(this, state);
+    }
+
     public void Dispose()
     {
         Stop();
+        WebhookClientBroker.Unbind();
+        _tunnelManager?.Dispose();
         Log.CloseAndFlush();
     }
 }
 
+/// <summary>
+/// Modos de operación del engine.
+/// </summary>
+public enum EngineMode
+{
+    /// <summary>Detenido completamente.</summary>
+    Stopped,
+    /// <summary>Servidor HTTP activo, solo accesible localmente (o por LAN).</summary>
+    Local,
+    /// <summary>Servidor HTTP activo + túnel Cloudflare conectado (accesible desde internet).</summary>
+    Public
+}
+
+/// <summary>
+/// Estado actual del engine, emitido por OnStateChanged.
+/// </summary>
+public class EngineState : EventArgs
+{
+    public bool IsRunning { get; set; }
+    public bool IsTunnelEnabled { get; set; }
+    public bool IsTunnelConnected { get; set; }
+    public EngineMode Mode { get; set; }
+}
+
 public class WebhookPayloadEventArgs : EventArgs
 {
-    public string Source { get; set; }
-    public string RawJson { get; set; }
+    public string? Source { get; set; }
+    public string? RawJson { get; set; }
 }
 
 public class LogEventArgs : EventArgs
 {
-    public string Level { get; set; }
-    public string Message { get; set; }
+    public string? Level { get; set; }
+    public string? Message { get; set; }
 }
 
 public class UiEventLogSink : ILogEventSink
