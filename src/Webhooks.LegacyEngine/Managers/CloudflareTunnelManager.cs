@@ -30,8 +30,12 @@ public class CloudflareTunnelManager : IDisposable
     private DateTime _processStartTime;
     private TunnelLocalConfig _localConfig;
 
-    private const string CloudflaredDownloadUrl =
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
+    private static bool IsWindows => Environment.OSVersion.Platform == PlatformID.Win32NT;
+    private static string ExeName => IsWindows ? "cloudflared.exe" : "cloudflared";
+    private static string CloudflaredDownloadUrl => IsWindows 
+        ? "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+        : "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64";
+
     private const string CloudflareApiBase = "https://api.cloudflare.com/client/v4";
 
     // Eventos hacia el WebhookHost / UI
@@ -42,7 +46,7 @@ public class CloudflareTunnelManager : IDisposable
     {
         _localPort = localPort;
         _config = config;
-        _exePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cloudflared.exe");
+        _exePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ExeName);
         _configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tunnel_config.json");
 
         // Watchdog: vigilar cada 5 segundos si el proceso se cayó
@@ -126,11 +130,11 @@ public class CloudflareTunnelManager : IDisposable
             Serilog.Log.Information("tunnel_config.json eliminado");
         }
 
-        // Eliminar cloudflared.exe local
+        // Eliminar binario local
         if (File.Exists(_exePath))
         {
             File.Delete(_exePath);
-            Serilog.Log.Information("cloudflared.exe eliminado");
+            Serilog.Log.Information($"{ExeName} eliminado");
         }
 
         _localConfig = null;
@@ -374,7 +378,7 @@ public class CloudflareTunnelManager : IDisposable
         try
         {
             _process = new Process();
-            string finalPath = File.Exists(_exePath) ? _exePath : "cloudflared";
+            string finalPath = File.Exists(_exePath) ? _exePath : ExeName;
             _process.StartInfo.FileName = finalPath;
             _process.StartInfo.Arguments = $"tunnel run --token {_localConfig.TunnelToken}";
             _process.StartInfo.UseShellExecute = false;
@@ -424,14 +428,14 @@ public class CloudflareTunnelManager : IDisposable
 
         // Buscar en PATH del sistema
         var systemPath = Environment.GetEnvironmentVariable("PATH");
-        var paths = systemPath?.Split(';') ?? Array.Empty<string>();
-        return paths.Any(p => File.Exists(Path.Combine(p, "cloudflared.exe")));
+        var paths = systemPath?.Split(Path.PathSeparator) ?? Array.Empty<string>();
+        return paths.Any(p => File.Exists(Path.Combine(p, ExeName)));
     }
 
     private async Task DownloadBinaryAsync()
     {
         _isInstalling = true;
-        NotifyStatus("Auto-descargando cloudflared.exe (~60MB)...", "🟠");
+        NotifyStatus($"Auto-descargando {ExeName} (~60MB)...", "🟠");
 
         try
         {
@@ -445,8 +449,31 @@ public class CloudflareTunnelManager : IDisposable
                     await response.Content.CopyToAsync(fs);
                 }
             }
-            NotifyStatus("cloudflared.exe descargado exitosamente", "🟢");
-            Serilog.Log.Information("cloudflared.exe auto-descargado");
+
+            // Asignar permisos de ejecución en Linux/Docker
+            if (!IsWindows)
+            {
+                try
+                {
+                    var proc = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "chmod",
+                        Arguments = $"+x \"{_exePath}\"",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    });
+                    proc?.WaitForExit();
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Warning(ex, "No se pudo asignar a chmod +x automáticamente. Es posible que el binario cloudflared no arranque.");
+                }
+            }
+
+            NotifyStatus($"{ExeName} descargado exitosamente", "🟢");
+            Serilog.Log.Information($"{ExeName} auto-descargado");
         }
         catch (Exception ex)
         {
