@@ -220,7 +220,7 @@ public class WebhookHost : IDisposable
             // La ACL existe → usar exclusivamente http://+:port (localhost genera conflicto)
             _owinServer = WebApp.Start<Server.Startup>(allInterfacesUrl);
             _listeningUrl = allInterfacesUrl;
-            Log.Information($"API HTTP escuchando en TODAS las interfaces (puerto {_port})");
+            //Log.Information($"API HTTP escuchando en TODAS las interfaces (puerto {_port})");
             OnServerStatusChanged?.Invoke(this, $"🟢 API HTTP escuchando en todas las interfaces (puerto {_port})");
             EmitLocalUrl();
             return;
@@ -235,7 +235,7 @@ public class WebhookHost : IDisposable
             // ACL registrada acabamos de registrar → usar http://+:port
             _owinServer = WebApp.Start<Server.Startup>(allInterfacesUrl);
             _listeningUrl = allInterfacesUrl;
-            Log.Information($"URL ACL registrada. API HTTP escuchando en TODAS las interfaces (puerto {_port})");
+            //Log.Information($"URL ACL registrada. API HTTP escuchando en TODAS las interfaces (puerto {_port})");
             OnServerStatusChanged?.Invoke(this, $"🟢 API HTTP escuchando en todas las interfaces (puerto {_port})");
             EmitLocalUrl();
             return;
@@ -244,7 +244,7 @@ public class WebhookHost : IDisposable
         // UAC rechazado → fallback seguro a localhost (no hay ACL, así que no hay conflicto)
         _owinServer = WebApp.Start<Server.Startup>(localhostUrl);
         _listeningUrl = localhostUrl;
-        Log.Warning("Escuchando solo en localhost (sin acceso por IP LAN). Acepte el permiso UAC para habilitar acceso LAN.");
+        //Log.Warning("Escuchando solo en localhost (sin acceso por IP LAN). Acepte el permiso UAC para habilitar acceso LAN.");
         OnServerStatusChanged?.Invoke(this, $"🟠 API HTTP solo en localhost:{_port} (sin acceso LAN)");
         EmitLocalUrl();
     }
@@ -415,7 +415,9 @@ public class WebhookHost : IDisposable
         _isTunnelConnected = false;
         _listeningUrl = string.Empty;
 
-        Log.Information("API HTTP Apagado");
+        //
+        //
+        //Log.Information("API HTTP Apagado");
         OnServerStatusChanged?.Invoke(this, "🔴 API HTTP Apagado");
         EmitStateChanged();
     }
@@ -438,10 +440,51 @@ public class WebhookHost : IDisposable
 
     // --- Métodos Invocados Internamente por los Controllers ---
 
+    /// <summary>
+    /// Procesador async opcional. Si esta seteado, el controller espera su resultado y
+    /// responde 200/404/503 al sender segun corresponda. Si es null, se cae al comportamiento
+    /// legacy (siempre 200) y solo se dispara el evento OnWebhookReceived.
+    /// </summary>
+    public Func<string, string, IDictionary<string, string>, Task<WebhookProcessResult>> Processor { get; set; }
+
     internal void TriggerWebhookReceived(string source, string rawJson)
     {
-        Log.Information($"Webhook recibido internamente origen: [{source}] | Largo: {rawJson?.Length} chars");
-        OnWebhookReceived?.Invoke(this, new WebhookPayloadEventArgs { Source = source, RawJson = rawJson });
+        TriggerWebhookReceived(source, rawJson, null);
+    }
+
+    internal void TriggerWebhookReceived(string source, string rawJson, IDictionary<string, string> headers)
+    {
+        //Log.Information($"Webhook recibido internamente origen: [{source}] | Largo: {rawJson?.Length} chars");
+        OnWebhookReceived?.Invoke(this, new WebhookPayloadEventArgs
+        {
+            Source = source,
+            RawJson = rawJson,
+            Headers = headers ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        });
+    }
+
+    /// <summary>
+    /// Dispara el evento de notificacion (UI/logging) y, si hay Processor registrado,
+    /// devuelve su resultado para que el controller responda con el status HTTP apropiado.
+    /// </summary>
+    internal async Task<WebhookProcessResult> TriggerWebhookProcessAsync(string source, string rawJson, IDictionary<string, string> headers)
+    {
+        // 1) Disparar el evento legacy (UI logging). No bloquea ni afecta el resultado.
+        TriggerWebhookReceived(source, rawJson, headers);
+
+        // 2) Si no hay processor registrado: comportamiento histórico (200 OK).
+        var processor = Processor;
+        if (processor == null) return WebhookProcessResult.Processed;
+
+        try
+        {
+            return await processor(source, rawJson, headers);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, $"Error en WebhookHost.Processor para source '{source}'");
+            return WebhookProcessResult.NotProcessed;
+        }
     }
 
     internal void TriggerWebhookError(string source, string error)
@@ -507,6 +550,25 @@ public class WebhookPayloadEventArgs : EventArgs
 {
     public string? Source { get; set; }
     public string? RawJson { get; set; }
+    /// <summary>
+    /// Headers HTTP relevantes capturados de la peticion entrante.
+    /// Las claves son case-insensitive (StringComparer.OrdinalIgnoreCase).
+    /// </summary>
+    public IDictionary<string, string> Headers { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>
+/// Resultado de procesar un webhook. El controller mapea cada valor a un status HTTP
+/// para que el sistema externo (worker/MP/WC/etc.) sepa si debe reintentar.
+/// </summary>
+public enum WebhookProcessResult
+{
+    /// <summary>El webhook fue procesado correctamente (200 OK).</summary>
+    Processed,
+    /// <summary>No hay provider registrado para ese source (404 - no reintentar).</summary>
+    NoProvider,
+    /// <summary>El provider existe pero no pudo procesar (503 - reintentar).</summary>
+    NotProcessed
 }
 
 public class LogEventArgs : EventArgs

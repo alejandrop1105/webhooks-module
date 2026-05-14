@@ -380,7 +380,8 @@ public class CloudflareTunnelManager : IDisposable
             _process = new Process();
             string finalPath = File.Exists(_exePath) ? _exePath : ExeName;
             _process.StartInfo.FileName = finalPath;
-            _process.StartInfo.Arguments = $"tunnel run --token {_localConfig.TunnelToken}";
+            //si se quiere mayor informacion del log se puede sacar el --loglevel fatal
+            _process.StartInfo.Arguments = $"tunnel run --token {_localConfig.TunnelToken}  --loglevel fatal";
             _process.StartInfo.UseShellExecute = false;
             _process.StartInfo.RedirectStandardError = true;
             _process.StartInfo.CreateNoWindow = true;
