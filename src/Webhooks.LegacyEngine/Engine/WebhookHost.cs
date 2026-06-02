@@ -384,8 +384,8 @@ public class WebhookHost : IDisposable
         catch (Exception)
         {
             // El servidor no respondió 2xx o rechazó la conexión. ¡Se cayó el Listener!
-            Log.Warning("⚠️ El Listener OWIN dejó de responder peticiones.");
-            OnServerStatusChanged?.Invoke(this, "🟠 Detectada caída del servidor HTTP (Auto-Reconectando...)");
+            Log.Warning("El Listener OWIN dejó de responder peticiones.");
+            OnServerStatusChanged?.Invoke(this, "Detectada caída del servidor HTTP (Auto-Reconectando...)");
 
             // Reanimarlo
             _owinServer?.Dispose();
