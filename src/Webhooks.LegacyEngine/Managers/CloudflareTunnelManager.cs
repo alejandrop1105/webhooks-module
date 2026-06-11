@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Management;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
@@ -113,6 +114,43 @@ public class CloudflareTunnelManager : IDisposable
         _watchdogTimer.Stop();
         KillProcessSafely();
         NotifyStatus("Detenido intencionalmente", "🔴");
+    }
+
+    /// <summary>
+    /// Detiene el proceso cloudflared y elimina del lado de Cloudflare tanto el CNAME
+    /// como el cfd_tunnel asociados. Limpia también la config local para que el próximo
+    /// arranque parta desde cero. Pensado para llamarse cuando el usuario desactiva
+    /// explícitamente el switch del túnel, evitando que se acumulen recursos huérfanos.
+    /// </summary>
+    public async Task<bool> EliminarRecursosCloudflareAsync()
+    {
+        Stop();
+        KillOrphanedTunnelProcesses();
+
+        try
+        {
+            using var client = new CloudflareDnsClient(_config);
+            bool dnsOk = await client.EliminarRegistroDnsAsync(_config.Hostname);
+            bool tunOk = await client.EliminarTunelAsync(_config.TunnelName);
+
+            if (File.Exists(_configPath))
+            {
+                try { File.Delete(_configPath); } catch { /* best effort */ }
+            }
+            _localConfig = null;
+
+            if (dnsOk && tunOk)
+                NotifyStatus("🟢 Recursos Cloudflare eliminados", "🟢");
+            else
+                NotifyStatus("🟡 Recursos Cloudflare eliminados parcialmente — revisar dashboard", "🟡");
+            return dnsOk && tunOk;
+        }
+        catch (Exception ex)
+        {
+            NotifyStatus($"🔴 Error eliminando recursos Cloudflare: {ex.Message}", "🔴");
+            Serilog.Log.Warning(ex, "CloudflareTunnelManager.EliminarRecursosCloudflareAsync falló para {Host}", _config.Hostname);
+            return false;
+        }
     }
 
     /// <summary>
@@ -320,23 +358,41 @@ public class CloudflareTunnelManager : IDisposable
     {
         string hostname = _config.Hostname;
 
-        // Verificar si ya existe
+        // 1) Verificar si ya existe el CNAME
         string checkUrl = $"{CloudflareApiBase}/zones/{_config.ZoneId}/dns_records?name={hostname}&type=CNAME";
-        var checkResponse = await http.GetAsync(checkUrl);
-        var checkJson = JObject.Parse(await checkResponse.Content.ReadAsStringAsync());
-
-        if (checkResponse.IsSuccessStatusCode && (bool)checkJson["success"])
+        HttpResponseMessage checkResponse;
+        JObject checkJson;
+        try
         {
-            var records = checkJson["result"] as JArray;
-            if (records != null && records.Count > 0)
-            {
-                Serilog.Log.Information($"Registro DNS ya existe: {hostname}");
-                return;
-            }
+            checkResponse = await http.GetAsync(checkUrl);
+            checkJson = JObject.Parse(await checkResponse.Content.ReadAsStringAsync());
+        }
+        catch (Exception ex)
+        {
+            NotifyStatus($"🔴 Error consultando DNS en Cloudflare: {ex.Message}", "🔴");
+            Serilog.Log.Error(ex, "EnsureDnsRecordAsync: fallo HTTP consultando DNS para {Host}", hostname);
+            return;
         }
 
-        // Crear CNAME
-        NotifyStatus($"Creando registro DNS: {hostname}...", "🟡");
+        if (!checkResponse.IsSuccessStatusCode || checkJson["success"]?.Value<bool>() != true)
+        {
+            string motivo = FormatCloudflareError(checkJson, (int)checkResponse.StatusCode);
+            NotifyStatus($"🔴 Cloudflare rechazó la consulta de DNS ({motivo}). Revisar Zone ID y permiso DNS:Edit del token.", "🔴");
+            Serilog.Log.Warning("EnsureDnsRecordAsync: consulta DNS rechazada por Cloudflare. Host={Host} Status={Status} Body={Body}",
+                hostname, (int)checkResponse.StatusCode, checkJson.ToString());
+            return;
+        }
+
+        var records = checkJson["result"] as JArray;
+        if (records != null && records.Count > 0)
+        {
+            NotifyStatus($"🟢 DNS CNAME ya existe: {hostname}", "🟢");
+            Serilog.Log.Information("EnsureDnsRecordAsync: CNAME ya existe para {Host}", hostname);
+            return;
+        }
+
+        // 2) Crear CNAME nuevo
+        NotifyStatus($"🟡 Creando DNS CNAME: {hostname} → {tunnelId}.cfargotunnel.com ...", "🟡");
 
         var dnsBody = new
         {
@@ -346,19 +402,55 @@ public class CloudflareTunnelManager : IDisposable
             proxied = true
         };
 
-        var content = new StringContent(JsonConvert.SerializeObject(dnsBody), Encoding.UTF8, "application/json");
-        var response = await http.PostAsync($"{CloudflareApiBase}/zones/{_config.ZoneId}/dns_records", content);
-        var json = JObject.Parse(await response.Content.ReadAsStringAsync());
-
-        if (response.IsSuccessStatusCode && (bool)json["success"])
+        HttpResponseMessage createResponse;
+        JObject createJson;
+        try
         {
-            Serilog.Log.Information($"DNS CNAME creado: {hostname}");
+            var content = new StringContent(JsonConvert.SerializeObject(dnsBody), Encoding.UTF8, "application/json");
+            createResponse = await http.PostAsync($"{CloudflareApiBase}/zones/{_config.ZoneId}/dns_records", content);
+            createJson = JObject.Parse(await createResponse.Content.ReadAsStringAsync());
+        }
+        catch (Exception ex)
+        {
+            NotifyStatus($"🔴 Error de red creando DNS: {ex.Message}", "🔴");
+            Serilog.Log.Error(ex, "EnsureDnsRecordAsync: fallo HTTP creando DNS para {Host}", hostname);
+            return;
+        }
+
+        if (createResponse.IsSuccessStatusCode && createJson["success"]?.Value<bool>() == true)
+        {
+            NotifyStatus($"🟢 DNS CNAME creado: {hostname}", "🟢");
+            Serilog.Log.Information("EnsureDnsRecordAsync: CNAME creado para {Host}", hostname);
         }
         else
         {
-            string errors = json["errors"]?.ToString() ?? "Error desconocido";
-            Serilog.Log.Warning($"Advertencia DNS: {errors}");
+            string motivo = FormatCloudflareError(createJson, (int)createResponse.StatusCode);
+            NotifyStatus($"🔴 Cloudflare rechazó la creación del DNS ({motivo}). El túnel no será alcanzable.", "🔴");
+            Serilog.Log.Warning("EnsureDnsRecordAsync: creación DNS rechazada por Cloudflare. Host={Host} Status={Status} Body={Body}",
+                hostname, (int)createResponse.StatusCode, createJson.ToString());
         }
+    }
+
+    /// <summary>
+    /// Extrae el primer error legible de una respuesta de la API de Cloudflare. Cloudflare devuelve
+    /// <c>{ "success": false, "errors": [{"code": NNN, "message": "..."}] }</c> — armamos un string
+    /// con el código y mensaje para mostrar en el panel.
+    /// </summary>
+    private static string FormatCloudflareError(JObject? json, int httpStatus)
+    {
+        try
+        {
+            var firstErr = (json?["errors"] as JArray)?.FirstOrDefault();
+            if (firstErr != null)
+            {
+                string? code = firstErr["code"]?.ToString();
+                string? msg = firstErr["message"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(msg))
+                    return $"HTTP {httpStatus}, code {code}: {msg}";
+            }
+        }
+        catch { /* parseo defensivo */ }
+        return $"HTTP {httpStatus}";
     }
 
     // ──────────────────────────────────────────────
@@ -370,8 +462,11 @@ public class CloudflareTunnelManager : IDisposable
         KillProcessSafely();
         _isConnected = false;
 
-        // Nota: NO matamos todos los cloudflared del sistema.
-        // Puede haber otros proyectos con sus propios túneles corriendo.
+        // Limpiamos cloudflared huérfanos de instancias previas de DEAM que se cerraron
+        // abruptamente (crash, taskkill, debugger detenido). Sólo matamos los que están
+        // corriendo NUESTRO tunnel token; otros proyectos con sus propios túneles quedan
+        // intactos.
+        KillOrphanedTunnelProcesses();
 
         NotifyStatus("Iniciando proceso cloudflared...", "🟡");
 
@@ -523,6 +618,53 @@ public class CloudflareTunnelManager : IDisposable
         }
         _process?.Dispose();
         _process = null;
+    }
+
+    /// <summary>
+    /// Mata procesos cloudflared.exe huérfanos cuya línea de comandos contiene NUESTRO
+    /// tunnel token. Evita el leak de procesos cuando DEAM se cierra abruptamente sin
+    /// que <see cref="KillProcessSafely"/> alcance a correr. No toca cloudflared de
+    /// otros proyectos.
+    /// </summary>
+    private void KillOrphanedTunnelProcesses()
+    {
+        string? token = _localConfig?.TunnelToken;
+        if (string.IsNullOrEmpty(token)) return;
+
+        int? currentPid = null;
+        try { currentPid = _process?.Id; } catch { /* proceso ya disposed o sin start */ }
+
+        try
+        {
+            const string query = "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'cloudflared.exe'";
+            using var searcher = new ManagementObjectSearcher(query);
+            using var collection = searcher.Get();
+            foreach (ManagementObject mo in collection)
+            {
+                try
+                {
+                    string cmdLine = mo["CommandLine"]?.ToString() ?? string.Empty;
+                    if (cmdLine.IndexOf(token!, StringComparison.Ordinal) < 0) continue;
+
+                    int pid = Convert.ToInt32(mo["ProcessId"]);
+                    if (currentPid.HasValue && pid == currentPid.Value) continue;
+
+                    try
+                    {
+                        using var orphan = Process.GetProcessById(pid);
+                        orphan.Kill();
+                        Serilog.Log.Information("Matado cloudflared huérfano PID={Pid}", pid);
+                    }
+                    catch (ArgumentException) { /* el proceso ya murió entre el WMI y el Kill */ }
+                    catch (Exception exKill) { Serilog.Log.Warning(exKill, "No se pudo matar cloudflared huérfano PID={Pid}", pid); }
+                }
+                finally { mo.Dispose(); }
+            }
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "Limpieza de cloudflared huérfanos falló");
+        }
     }
 
     // ──────────────────────────────────────────────

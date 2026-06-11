@@ -149,6 +149,24 @@ public class WebhookHost : IDisposable
         _tunnelManager.OnUrlGenerated += TunnelManager_OnUrlGenerated;
     }
 
+    /// <summary>
+    /// Desactiva el túnel: detiene el proceso cloudflared local y elimina los recursos
+    /// asociados (cfd_tunnel + CNAME) del lado de Cloudflare. Pensado para que la UI
+    /// lo llame cuando el usuario apaga el switch del túnel — así Cloudflare queda
+    /// siempre limpio sin acumular recursos huérfanos.
+    /// </summary>
+    public async Task<bool> DesactivarYLimpiarTunelAsync()
+    {
+        _isTunnelEnabled = false;
+        _isTunnelConnected = false;
+
+        if (_tunnelManager == null) return true;
+
+        bool ok = await _tunnelManager.EliminarRecursosCloudflareAsync();
+        EmitStateChanged();
+        return ok;
+    }
+
     private void TunnelManager_OnStatusChanged(object sender, string e)
     {
         // Detectar cambio de conexión del túnel por el icono de estado
