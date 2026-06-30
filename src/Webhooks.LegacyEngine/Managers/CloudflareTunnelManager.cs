@@ -89,8 +89,27 @@ public class CloudflareTunnelManager : IDisposable
                 SaveLocalConfig(_localConfig);
             }
 
-            NotifyStatus("Configuración local encontrada, conectando túnel existente...", "🟡");
-            Serilog.Log.Information($"Reutilizando túnel existente: {_localConfig.Hostname}");
+            NotifyStatus("Configuración local encontrada, validando contra Cloudflare...", "🟡");
+            Serilog.Log.Information($"Validando reutilización de túnel: {_localConfig.Hostname}");
+
+            // Validar que el túnel siga existiendo en Cloudflare y que el CNAME esté creado.
+            // Sin esto, una eliminación manual del túnel desde el dashboard dejaba al sistema
+            // en un bucle infinito de watchdog intentando arrancar con un token muerto.
+            bool sigueValido = await ValidarRecursosExistentesAsync();
+            if (!sigueValido)
+            {
+                NotifyStatus("Config local desincronizada con Cloudflare. Re-provisionando...", "🟠");
+                Serilog.Log.Warning("Túnel local huérfano detectado (no existe en Cloudflare). Re-provisionando.");
+                InvalidarConfigLocal();
+
+                bool provisioned = await ProvisionTunnelAsync();
+                if (!provisioned) return;
+            }
+            else
+            {
+                NotifyStatus("Túnel válido en Cloudflare, reutilizando...", "🟢");
+                Serilog.Log.Information($"Reutilizando túnel existente: {_localConfig.Hostname}");
+            }
         }
         else
         {
@@ -179,9 +198,147 @@ public class CloudflareTunnelManager : IDisposable
         NotifyStatus("Reset completo. Próxima ejecución re-descargará y re-conectará.", "🟠");
     }
 
+    /// <summary>
+    /// Diagnóstico/auto-reparación on-demand. Reusa el flujo del <see cref="StartAsync"/>
+    /// pero forzando la validación contra Cloudflare incluso si la config local parece
+    /// consistente. Si encuentra inconsistencias (túnel borrado del dashboard, CNAME
+    /// faltante) re-provisiona los recursos. Pensado para que la UI lo dispare cuando
+    /// el usuario sospecha que el túnel quedó huérfano y los webhooks no llegan.
+    /// Si el proceso cloudflared estaba corriendo, lo reinicia con la config nueva.
+    /// </summary>
+    public async Task<bool> ValidarYRepararAsync()
+    {
+        if (!_config.IsValid)
+        {
+            NotifyStatus("Configuración de Cloudflare incompleta", "🔴");
+            return false;
+        }
+
+        if (!CloudflaredExists())
+        {
+            await DownloadBinaryAsync();
+            if (!CloudflaredExists()) return false;
+        }
+
+        bool estabaCorriendo = _process != null && !_process.HasExited;
+        if (estabaCorriendo)
+        {
+            _watchdogTimer.Stop();
+            KillProcessSafely();
+        }
+
+        bool ok;
+        if (File.Exists(_configPath))
+        {
+            _localConfig = LoadLocalConfig();
+            if (_localConfig.Hostname != _config.Hostname)
+            {
+                _localConfig.Hostname = _config.Hostname;
+                SaveLocalConfig(_localConfig);
+            }
+
+            NotifyStatus("Diagnosticando recursos en Cloudflare...", "🟡");
+            bool valido = await ValidarRecursosExistentesAsync();
+            if (!valido)
+            {
+                NotifyStatus("Recursos huérfanos detectados. Re-provisionando...", "🟠");
+                InvalidarConfigLocal();
+                ok = await ProvisionTunnelAsync();
+            }
+            else
+            {
+                NotifyStatus("Túnel y CNAME OK en Cloudflare", "🟢");
+                ok = true;
+            }
+        }
+        else
+        {
+            NotifyStatus("Sin config local. Provisionando túnel desde cero...", "🟡");
+            ok = await ProvisionTunnelAsync();
+        }
+
+        if (!ok)
+        {
+            NotifyStatus("Falló la validación/reparación del túnel", "🔴");
+            return false;
+        }
+
+        if (estabaCorriendo)
+        {
+            OnUrlGenerated?.Invoke(this, $"https://{_config.Hostname}");
+            StartTunnelProcess();
+        }
+        return true;
+    }
+
     // ──────────────────────────────────────────────
     // Provisionamiento vía API Cloudflare
     // ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Confirma contra la API de Cloudflare que el túnel guardado en <see cref="_localConfig"/>
+    /// sigue existiendo y que el CNAME está creado. Devuelve <c>false</c> sólo cuando hay
+    /// evidencia explícita de que el túnel ya no existe (HTTP 404 o <c>deleted_at</c> seteado);
+    /// ante errores de red transitorios devuelve <c>true</c> para no tirar la config local
+    /// y caer en un re-provisionamiento desproporcionado.
+    /// </summary>
+    private async Task<bool> ValidarRecursosExistentesAsync()
+    {
+        if (_localConfig == null || string.IsNullOrEmpty(_localConfig.TunnelId)) return false;
+
+        try
+        {
+            using (var http = CreateHttpClient())
+            {
+                string url = $"{CloudflareApiBase}/accounts/{_config.AccountId}/cfd_tunnel/{_localConfig.TunnelId}";
+                var response = await http.GetAsync(url);
+
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    Serilog.Log.Warning("ValidarRecursosExistentesAsync: túnel {TunnelId} devolvió 404 en Cloudflare", _localConfig.TunnelId);
+                    return false;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Serilog.Log.Warning("ValidarRecursosExistentesAsync: respuesta inesperada {Code} consultando túnel {TunnelId}",
+                        (int)response.StatusCode, _localConfig.TunnelId);
+                    return true;
+                }
+
+                var json = JObject.Parse(await response.Content.ReadAsStringAsync());
+                string deletedAt = json["result"]?["deleted_at"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(deletedAt) && deletedAt != "null")
+                {
+                    Serilog.Log.Warning("ValidarRecursosExistentesAsync: túnel {TunnelId} aparece soft-deleted ({DeletedAt})",
+                        _localConfig.TunnelId, deletedAt);
+                    return false;
+                }
+
+                await EnsureDnsRecordAsync(http, _localConfig.TunnelId);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "ValidarRecursosExistentesAsync: fallo consultando estado en Cloudflare; asumiendo válido");
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Borra el <c>tunnel_config.json</c> y limpia <see cref="_localConfig"/> en memoria
+    /// para forzar que el próximo <see cref="ProvisionTunnelAsync"/> arranque desde cero.
+    /// </summary>
+    private void InvalidarConfigLocal()
+    {
+        if (File.Exists(_configPath))
+        {
+            try { File.Delete(_configPath); }
+            catch (Exception ex) { Serilog.Log.Warning(ex, "InvalidarConfigLocal: no se pudo borrar {Path}", _configPath); }
+        }
+        _localConfig = null;
+    }
 
     private async Task<bool> ProvisionTunnelAsync()
     {
@@ -245,7 +402,7 @@ public class CloudflareTunnelManager : IDisposable
 
     private async Task<(string id, string token)?> FindExistingTunnelAsync(HttpClient http)
     {
-        string url = $"{CloudflareApiBase}/accounts/{_config.AccountId}/cfd_tunnel?name={_config.TunnelName}&is_deleted=false";
+        string url = $"{CloudflareApiBase}/accounts/{_config.AccountId}/cfd_tunnel?name={Uri.EscapeDataString(_config.TunnelName)}&is_deleted=false&per_page=50";
         var response = await http.GetAsync(url);
         var json = JObject.Parse(await response.Content.ReadAsStringAsync());
 

@@ -456,6 +456,25 @@ public class WebhookHost : IDisposable
         Log.Information("Reset de túnel Cloudflare completado");
     }
 
+    /// <summary>
+    /// Diagnóstico on-demand: valida que el cfd_tunnel y el CNAME existan en Cloudflare
+    /// y re-provisiona los recursos faltantes. Pensado para un botón en la UI que el
+    /// usuario aprieta cuando sospecha que el túnel quedó huérfano. Si el túnel estaba
+    /// corriendo, lo reinicia con la config nueva.
+    /// </summary>
+    public async Task<bool> RevalidarYReprovisionarTunelAsync()
+    {
+        if (_tunnelManager == null)
+        {
+            Log.Warning("No hay Tunnel Manager configurado para revalidar.");
+            return false;
+        }
+
+        bool ok = await _tunnelManager.ValidarYRepararAsync();
+        EmitStateChanged();
+        return ok;
+    }
+
     // --- Métodos Invocados Internamente por los Controllers ---
 
     /// <summary>
