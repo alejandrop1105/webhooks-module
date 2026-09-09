@@ -17,6 +17,14 @@ namespace Webhooks.LegacyEngine.Engine;
 /// </summary>
 public class WebhookHost : IDisposable
 {
+    /// <summary>
+    /// El logger del engine. Sombrea deliberadamente a <see cref="Serilog.Log"/> dentro
+    /// de esta clase, de modo que los <c>Log.Information(...)</c> de siempre escriban en
+    /// el logger propio en lugar del global de la aplicación anfitriona. Ver
+    /// <see cref="EngineLog"/> para el porqué.
+    /// </summary>
+    private static ILogger Log => EngineLog.Current;
+
     private IDisposable? _owinServer;
     private CloudflareTunnelManager? _tunnelManager;
     private readonly int _port;
@@ -108,16 +116,18 @@ public class WebhookHost : IDisposable
         _port = port;
         Instance = this;
 
-        // Inicializar Serilog Rotativo (Retención 5 días) y Sink UI
+        // Inicializar Serilog Rotativo (Retención 5 días) y Sink UI.
+        // Se instala en EngineLog, NO en el Serilog global: ese lo administra la
+        // aplicación anfitriona y pisarlo le rompe el logging. Ver EngineLog.
         string logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "webhook-engine-.txt");
-        Log.Logger = new LoggerConfiguration()
+        EngineLog.Configure(new LoggerConfiguration()
             .MinimumLevel.Information()
             .WriteTo.File(logPath,
                 rollingInterval: RollingInterval.Day,
                 retainedFileCountLimit: 5,
                 outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
             .WriteTo.Sink(new UiEventLogSink())
-            .CreateLogger();
+            .CreateLogger());
 
         Log.Information("====== Webhook Engine Inicializado ======");
 
@@ -555,7 +565,9 @@ public class WebhookHost : IDisposable
         Stop();
         WebhookClientBroker.Unbind();
         _tunnelManager?.Dispose();
-        Log.CloseAndFlush();
+        // Solo el logger del engine. NUNCA Log.CloseAndFlush(): eso apagaba el logger
+        // global, que pertenece a la aplicación anfitriona. Ver EngineLog.
+        EngineLog.Shutdown();
     }
 }
 

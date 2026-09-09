@@ -165,7 +165,7 @@ public static class WebhookClientBroker
         host.OnLocalUrlGenerated += Host_OnLocalUrlGenerated;
         host.OnSystemLog += Host_OnSystemLog;
 
-        Serilog.Log.Information($"WebhookClientBroker vinculado al host (clientes webhook: {_webhookClients.Count})");
+        EngineLog.Current.Information($"WebhookClientBroker vinculado al host (clientes webhook: {_webhookClients.Count})");
     }
 
     /// <summary>
@@ -184,7 +184,7 @@ public static class WebhookClientBroker
         _boundHost.OnSystemLog -= Host_OnSystemLog;
 
         _boundHost = null;
-        Serilog.Log.Information("WebhookClientBroker desvinculado del host");
+        EngineLog.Current.Information("WebhookClientBroker desvinculado del host");
     }
 
     // ──────────────────────────────────────────────
@@ -208,7 +208,7 @@ public static class WebhookClientBroker
             }
             catch (Exception ex)
             {
-                Serilog.Log.Error(ex, $"Error en cliente webhook (source filter: {sub.SourceFilter ?? "*"})");
+                EngineLog.Current.Error(ex, $"Error en cliente webhook (source filter: {sub.SourceFilter ?? "*"})");
             }
         }
     }
@@ -221,7 +221,7 @@ public static class WebhookClientBroker
         foreach (var cb in snapshot)
         {
             try { cb?.Invoke(e); }
-            catch (Exception ex) { Serilog.Log.Error(ex, "Error en cliente de estado"); }
+            catch (Exception ex) { EngineLog.Current.Error(ex, "Error en cliente de estado"); }
         }
     }
 
@@ -233,7 +233,7 @@ public static class WebhookClientBroker
         foreach (var cb in snapshot)
         {
             try { cb?.Invoke(e); }
-            catch (Exception ex) { Serilog.Log.Error(ex, "Error en cliente de túnel status"); }
+            catch (Exception ex) { EngineLog.Current.Error(ex, "Error en cliente de túnel status"); }
         }
     }
 
@@ -245,7 +245,7 @@ public static class WebhookClientBroker
         foreach (var cb in snapshot)
         {
             try { cb?.Invoke(e); }
-            catch (Exception ex) { Serilog.Log.Error(ex, "Error en cliente de túnel URL"); }
+            catch (Exception ex) { EngineLog.Current.Error(ex, "Error en cliente de túnel URL"); }
         }
     }
 
@@ -257,7 +257,7 @@ public static class WebhookClientBroker
         foreach (var cb in snapshot)
         {
             try { cb?.Invoke(e); }
-            catch (Exception ex) { Serilog.Log.Error(ex, "Error en cliente de server status"); }
+            catch (Exception ex) { EngineLog.Current.Error(ex, "Error en cliente de server status"); }
         }
     }
 
@@ -269,7 +269,7 @@ public static class WebhookClientBroker
         foreach (var cb in snapshot)
         {
             try { cb?.Invoke(e); }
-            catch (Exception ex) { Serilog.Log.Error(ex, "Error en cliente de local URL"); }
+            catch (Exception ex) { EngineLog.Current.Error(ex, "Error en cliente de local URL"); }
         }
     }
 
@@ -281,7 +281,7 @@ public static class WebhookClientBroker
         foreach (var cb in snapshot)
         {
             try { cb?.Invoke(e.Level ?? string.Empty, e.Message ?? string.Empty); }
-            catch (Exception ex) { Serilog.Log.Error(ex, "Error en cliente de logs"); }
+            catch (Exception ex) { EngineLog.Current.Error(ex, "Error en cliente de logs"); }
         }
     }
 }

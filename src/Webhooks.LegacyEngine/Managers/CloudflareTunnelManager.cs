@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Timers;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Webhooks.LegacyEngine.Engine;
 
 namespace Webhooks.LegacyEngine.Managers;
 
@@ -90,7 +91,7 @@ public class CloudflareTunnelManager : IDisposable
             }
 
             NotifyStatus("Configuración local encontrada, validando contra Cloudflare...", "🟡");
-            Serilog.Log.Information($"Validando reutilización de túnel: {_localConfig.Hostname}");
+            EngineLog.Current.Information($"Validando reutilización de túnel: {_localConfig.Hostname}");
 
             // Validar que el túnel siga existiendo en Cloudflare y que el CNAME esté creado.
             // Sin esto, una eliminación manual del túnel desde el dashboard dejaba al sistema
@@ -99,7 +100,7 @@ public class CloudflareTunnelManager : IDisposable
             if (!sigueValido)
             {
                 NotifyStatus("Config local desincronizada con Cloudflare. Re-provisionando...", "🟠");
-                Serilog.Log.Warning("Túnel local huérfano detectado (no existe en Cloudflare). Re-provisionando.");
+                EngineLog.Current.Warning("Túnel local huérfano detectado (no existe en Cloudflare). Re-provisionando.");
                 InvalidarConfigLocal();
 
                 bool provisioned = await ProvisionTunnelAsync();
@@ -108,7 +109,7 @@ public class CloudflareTunnelManager : IDisposable
             else
             {
                 NotifyStatus("Túnel válido en Cloudflare, reutilizando...", "🟢");
-                Serilog.Log.Information($"Reutilizando túnel existente: {_localConfig.Hostname}");
+                EngineLog.Current.Information($"Reutilizando túnel existente: {_localConfig.Hostname}");
             }
         }
         else
@@ -167,7 +168,7 @@ public class CloudflareTunnelManager : IDisposable
         catch (Exception ex)
         {
             NotifyStatus($"🔴 Error eliminando recursos Cloudflare: {ex.Message}", "🔴");
-            Serilog.Log.Warning(ex, "CloudflareTunnelManager.EliminarRecursosCloudflareAsync falló para {Host}", _config.Hostname);
+            EngineLog.Current.Warning(ex, "CloudflareTunnelManager.EliminarRecursosCloudflareAsync falló para {Host}", _config.Hostname);
             return false;
         }
     }
@@ -184,14 +185,14 @@ public class CloudflareTunnelManager : IDisposable
         if (File.Exists(_configPath))
         {
             File.Delete(_configPath);
-            Serilog.Log.Information("tunnel_config.json eliminado");
+            EngineLog.Current.Information("tunnel_config.json eliminado");
         }
 
         // Eliminar binario local
         if (File.Exists(_exePath))
         {
             File.Delete(_exePath);
-            Serilog.Log.Information($"{ExeName} eliminado");
+            EngineLog.Current.Information($"{ExeName} eliminado");
         }
 
         _localConfig = null;
@@ -295,13 +296,13 @@ public class CloudflareTunnelManager : IDisposable
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    Serilog.Log.Warning("ValidarRecursosExistentesAsync: túnel {TunnelId} devolvió 404 en Cloudflare", _localConfig.TunnelId);
+                    EngineLog.Current.Warning("ValidarRecursosExistentesAsync: túnel {TunnelId} devolvió 404 en Cloudflare", _localConfig.TunnelId);
                     return false;
                 }
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Serilog.Log.Warning("ValidarRecursosExistentesAsync: respuesta inesperada {Code} consultando túnel {TunnelId}",
+                    EngineLog.Current.Warning("ValidarRecursosExistentesAsync: respuesta inesperada {Code} consultando túnel {TunnelId}",
                         (int)response.StatusCode, _localConfig.TunnelId);
                     return true;
                 }
@@ -310,7 +311,7 @@ public class CloudflareTunnelManager : IDisposable
                 string deletedAt = json["result"]?["deleted_at"]?.ToString();
                 if (!string.IsNullOrWhiteSpace(deletedAt) && deletedAt != "null")
                 {
-                    Serilog.Log.Warning("ValidarRecursosExistentesAsync: túnel {TunnelId} aparece soft-deleted ({DeletedAt})",
+                    EngineLog.Current.Warning("ValidarRecursosExistentesAsync: túnel {TunnelId} aparece soft-deleted ({DeletedAt})",
                         _localConfig.TunnelId, deletedAt);
                     return false;
                 }
@@ -321,7 +322,7 @@ public class CloudflareTunnelManager : IDisposable
         }
         catch (Exception ex)
         {
-            Serilog.Log.Warning(ex, "ValidarRecursosExistentesAsync: fallo consultando estado en Cloudflare; asumiendo válido");
+            EngineLog.Current.Warning(ex, "ValidarRecursosExistentesAsync: fallo consultando estado en Cloudflare; asumiendo válido");
             return true;
         }
     }
@@ -335,7 +336,7 @@ public class CloudflareTunnelManager : IDisposable
         if (File.Exists(_configPath))
         {
             try { File.Delete(_configPath); }
-            catch (Exception ex) { Serilog.Log.Warning(ex, "InvalidarConfigLocal: no se pudo borrar {Path}", _configPath); }
+            catch (Exception ex) { EngineLog.Current.Warning(ex, "InvalidarConfigLocal: no se pudo borrar {Path}", _configPath); }
         }
         _localConfig = null;
     }
@@ -355,7 +356,7 @@ public class CloudflareTunnelManager : IDisposable
                 {
                     tunnelId = existing.Value.id;
                     NotifyStatus($"Túnel '{_config.TunnelName}' ya existe en Cloudflare, reutilizando...", "🟡");
-                    Serilog.Log.Information($"Túnel existente encontrado: {tunnelId}");
+                    EngineLog.Current.Information($"Túnel existente encontrado: {tunnelId}");
 
                     // Obtener token del túnel existente
                     tunnelToken = await GetTunnelTokenAsync(http, tunnelId);
@@ -369,7 +370,7 @@ public class CloudflareTunnelManager : IDisposable
 
                     tunnelId = created.Value.id;
                     tunnelToken = created.Value.token;
-                    Serilog.Log.Information($"Túnel creado: {tunnelId}");
+                    EngineLog.Current.Information($"Túnel creado: {tunnelId}");
                 }
 
                 // 3. Asegurar que el CNAME DNS exista
@@ -395,7 +396,7 @@ public class CloudflareTunnelManager : IDisposable
         catch (Exception ex)
         {
             NotifyStatus($"Error de provisionamiento: {ex.Message}", "🔴");
-            Serilog.Log.Error(ex, "Error durante provisionamiento de túnel Cloudflare");
+            EngineLog.Current.Error(ex, "Error durante provisionamiento de túnel Cloudflare");
             return false;
         }
     }
@@ -461,7 +462,7 @@ public class CloudflareTunnelManager : IDisposable
         {
             string errors = json["errors"]?.ToString() ?? "Error desconocido";
             NotifyStatus($"Error al crear túnel: {errors}", "🔴");
-            Serilog.Log.Error($"API Cloudflare error al crear túnel: {errors}");
+            EngineLog.Current.Error($"API Cloudflare error al crear túnel: {errors}");
             return null;
         }
 
@@ -503,11 +504,11 @@ public class CloudflareTunnelManager : IDisposable
         if (!response.IsSuccessStatusCode)
         {
             var errorJson = await response.Content.ReadAsStringAsync();
-            Serilog.Log.Warning($"Advertencia al configurar ingress: {errorJson}");
+            EngineLog.Current.Warning($"Advertencia al configurar ingress: {errorJson}");
         }
         else
         {
-            Serilog.Log.Information("Ingress del túnel configurado vía API");
+            EngineLog.Current.Information("Ingress del túnel configurado vía API");
         }
     }
 
@@ -527,7 +528,7 @@ public class CloudflareTunnelManager : IDisposable
         catch (Exception ex)
         {
             NotifyStatus($"🔴 Error consultando DNS en Cloudflare: {ex.Message}", "🔴");
-            Serilog.Log.Error(ex, "EnsureDnsRecordAsync: fallo HTTP consultando DNS para {Host}", hostname);
+            EngineLog.Current.Error(ex, "EnsureDnsRecordAsync: fallo HTTP consultando DNS para {Host}", hostname);
             return;
         }
 
@@ -535,7 +536,7 @@ public class CloudflareTunnelManager : IDisposable
         {
             string motivo = FormatCloudflareError(checkJson, (int)checkResponse.StatusCode);
             NotifyStatus($"🔴 Cloudflare rechazó la consulta de DNS ({motivo}). Revisar Zone ID y permiso DNS:Edit del token.", "🔴");
-            Serilog.Log.Warning("EnsureDnsRecordAsync: consulta DNS rechazada por Cloudflare. Host={Host} Status={Status} Body={Body}",
+            EngineLog.Current.Warning("EnsureDnsRecordAsync: consulta DNS rechazada por Cloudflare. Host={Host} Status={Status} Body={Body}",
                 hostname, (int)checkResponse.StatusCode, checkJson.ToString());
             return;
         }
@@ -544,7 +545,7 @@ public class CloudflareTunnelManager : IDisposable
         if (records != null && records.Count > 0)
         {
             NotifyStatus($"🟢 DNS CNAME ya existe: {hostname}", "🟢");
-            Serilog.Log.Information("EnsureDnsRecordAsync: CNAME ya existe para {Host}", hostname);
+            EngineLog.Current.Information("EnsureDnsRecordAsync: CNAME ya existe para {Host}", hostname);
             return;
         }
 
@@ -570,20 +571,20 @@ public class CloudflareTunnelManager : IDisposable
         catch (Exception ex)
         {
             NotifyStatus($"🔴 Error de red creando DNS: {ex.Message}", "🔴");
-            Serilog.Log.Error(ex, "EnsureDnsRecordAsync: fallo HTTP creando DNS para {Host}", hostname);
+            EngineLog.Current.Error(ex, "EnsureDnsRecordAsync: fallo HTTP creando DNS para {Host}", hostname);
             return;
         }
 
         if (createResponse.IsSuccessStatusCode && createJson["success"]?.Value<bool>() == true)
         {
             NotifyStatus($"🟢 DNS CNAME creado: {hostname}", "🟢");
-            Serilog.Log.Information("EnsureDnsRecordAsync: CNAME creado para {Host}", hostname);
+            EngineLog.Current.Information("EnsureDnsRecordAsync: CNAME creado para {Host}", hostname);
         }
         else
         {
             string motivo = FormatCloudflareError(createJson, (int)createResponse.StatusCode);
             NotifyStatus($"🔴 Cloudflare rechazó la creación del DNS ({motivo}). El túnel no será alcanzable.", "🔴");
-            Serilog.Log.Warning("EnsureDnsRecordAsync: creación DNS rechazada por Cloudflare. Host={Host} Status={Status} Body={Body}",
+            EngineLog.Current.Warning("EnsureDnsRecordAsync: creación DNS rechazada por Cloudflare. Host={Host} Status={Status} Body={Body}",
                 hostname, (int)createResponse.StatusCode, createJson.ToString());
         }
     }
@@ -660,7 +661,7 @@ public class CloudflareTunnelManager : IDisposable
         // Loguear warnings y errores relevantes de cloudflared
         if (e.Data.Contains("ERR ") || e.Data.Contains("WRN "))
         {
-            Serilog.Log.Warning($"[Proxy Log] {e.Data}");
+            EngineLog.Current.Warning($"[Proxy Log] {e.Data}");
         }
 
         // Detectar conexión exitosa (solo notificar una vez, cloudflared crea ~4 conexiones)
@@ -721,17 +722,17 @@ public class CloudflareTunnelManager : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Serilog.Log.Warning(ex, "No se pudo asignar a chmod +x automáticamente. Es posible que el binario cloudflared no arranque.");
+                    EngineLog.Current.Warning(ex, "No se pudo asignar a chmod +x automáticamente. Es posible que el binario cloudflared no arranque.");
                 }
             }
 
             NotifyStatus($"{ExeName} descargado exitosamente", "🟢");
-            Serilog.Log.Information($"{ExeName} auto-descargado");
+            EngineLog.Current.Information($"{ExeName} auto-descargado");
         }
         catch (Exception ex)
         {
             NotifyStatus($"Error descargando cloudflared: {ex.Message}", "🔴");
-            Serilog.Log.Error(ex, "Error al descargar cloudflared.exe");
+            EngineLog.Current.Error(ex, "Error al descargar cloudflared.exe");
         }
         finally
         {
@@ -810,17 +811,17 @@ public class CloudflareTunnelManager : IDisposable
                     {
                         using var orphan = Process.GetProcessById(pid);
                         orphan.Kill();
-                        Serilog.Log.Information("Matado cloudflared huérfano PID={Pid}", pid);
+                        EngineLog.Current.Information("Matado cloudflared huérfano PID={Pid}", pid);
                     }
                     catch (ArgumentException) { /* el proceso ya murió entre el WMI y el Kill */ }
-                    catch (Exception exKill) { Serilog.Log.Warning(exKill, "No se pudo matar cloudflared huérfano PID={Pid}", pid); }
+                    catch (Exception exKill) { EngineLog.Current.Warning(exKill, "No se pudo matar cloudflared huérfano PID={Pid}", pid); }
                 }
                 finally { mo.Dispose(); }
             }
         }
         catch (Exception ex)
         {
-            Serilog.Log.Warning(ex, "Limpieza de cloudflared huérfanos falló");
+            EngineLog.Current.Warning(ex, "Limpieza de cloudflared huérfanos falló");
         }
     }
 
@@ -838,7 +839,7 @@ public class CloudflareTunnelManager : IDisposable
     {
         string json = JsonConvert.SerializeObject(config, Formatting.Indented);
         File.WriteAllText(_configPath, json);
-        Serilog.Log.Information($"Config local guardada en: {_configPath}");
+        EngineLog.Current.Information($"Config local guardada en: {_configPath}");
     }
 
     private HttpClient CreateHttpClient()
