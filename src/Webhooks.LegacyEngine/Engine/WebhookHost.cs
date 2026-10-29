@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Security.Principal;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Owin.Hosting;
 using Serilog;
@@ -29,6 +30,8 @@ public class WebhookHost : IDisposable
     private CloudflareTunnelManager? _tunnelManager;
     private readonly int _port;
     private readonly System.Timers.Timer _owinWatchdogTimer;
+    // True desde Stop() hasta el próximo Start(): el watchdog no reanima un servidor que se apagó a propósito.
+    private volatile bool _deteniendo;
     private CloudflareConfig? _cloudflareConfig;
     private string _listeningUrl = string.Empty;
     private bool _isTunnelEnabled;
@@ -203,6 +206,7 @@ public class WebhookHost : IDisposable
     public async Task Start(bool enableTunnel = false)
     {
         Stop(); // Limpiar basuras previas
+        _deteniendo = false;
         _isTunnelEnabled = enableTunnel;
         _isTunnelConnected = false;
 
@@ -395,29 +399,44 @@ public class WebhookHost : IDisposable
         }
     }
 
+    // async void: nada puede escaparse de este método, porque una excepción sin atrapar en el
+    // hilo del timer no la recibe nadie y puede tirar abajo la aplicación anfitriona.
     private async void Watchdog_CheckOwinHealth(object sender, System.Timers.ElapsedEventArgs e)
     {
         // Revisamos si alguien detuvo el engine por completo
-        if (_owinServer == null) return;
+        if (_deteniendo || _owinServer == null) return;
 
         try
         {
-            // El watchdog siempre verifica contra localhost (funciona en ambos modos)
-            using (var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(3) })
+            bool responde;
+            try
             {
-                var response = await hc.GetAsync($"http://localhost:{_port}/api/webhooks/ping");
-                response.EnsureSuccessStatusCode();
+                // El watchdog siempre verifica contra localhost (funciona en ambos modos)
+                using (var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(3) })
+                {
+                    var response = await hc.GetAsync($"http://localhost:{_port}/api/webhooks/ping");
+                    response.EnsureSuccessStatusCode();
+                }
+                responde = true;
             }
-        }
-        catch (Exception)
-        {
+            catch (Exception)
+            {
+                responde = false;
+            }
+
+            // Si mientras esperábamos el ping se detuvo el engine, el ping falla porque lo
+            // apagaron, no porque se haya caído: no hay nada que reanimar.
+            if (responde || _deteniendo) return;
+
             // El servidor no respondió 2xx o rechazó la conexión. ¡Se cayó el Listener!
             Log.Warning("El Listener OWIN dejó de responder peticiones.");
             OnServerStatusChanged?.Invoke(this, "Detectada caída del servidor HTTP (Auto-Reconectando...)");
 
             // Reanimarlo
-            _owinServer?.Dispose();
-            _owinServer = null;
+            DesecharServidorOwin();
+
+            // El aviso de arriba puede haber esperado al hilo de la UI, que mientras tanto apagó el engine.
+            if (_deteniendo) return;
 
             try
             {
@@ -428,14 +447,39 @@ public class WebhookHost : IDisposable
                 Log.Error(ex, "Intento de auto-reconexión OWIN fallido");
             }
         }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Error inesperado en el watchdog del servidor OWIN");
+        }
+    }
+
+    /// <summary>
+    /// Desecha el servidor OWIN actual, si hay uno. Lo saca de <see cref="_owinServer"/> antes de
+    /// desecharlo, así el watchdog y <see cref="Stop"/> nunca desechan el mismo servidor dos
+    /// veces. Si el HttpListener ya estaba desechado (se cayó solo), Dispose tira
+    /// ObjectDisposedException: el servidor ya está muerto, que es lo que se buscaba.
+    /// </summary>
+    private void DesecharServidorOwin()
+    {
+        IDisposable? servidor = Interlocked.Exchange(ref _owinServer, null);
+        if (servidor == null) return;
+
+        try
+        {
+            servidor.Dispose();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Ya estaba desechado.
+        }
     }
 
     public void Stop()
     {
+        _deteniendo = true;
         _owinWatchdogTimer?.Stop();
 
-        _owinServer?.Dispose();
-        _owinServer = null;
+        DesecharServidorOwin();
 
         _tunnelManager?.Stop();
 
